@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -12,12 +12,17 @@ from aiogram.types import (
     Message,
     FSInputFile,
     InputMediaPhoto,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 
 from config import BOT_TOKEN
 from database import (
     add_coffee,
     get_today_coffees,
+    get_all_coffees,
+    get_statistics,
+    delete_coffee,
 )
 from keyboards import (
     main_keyboard,
@@ -60,7 +65,42 @@ CHARACTER_IMAGES = {
 
 
 # =========================================================
-# РАБОТА С ГЛАВНЫМ СООБЩЕНИЕМ
+# ФОРМАТИРОВАНИЕ ДАТЫ
+# =========================================================
+
+def format_datetime(value: str) -> tuple[str, str]:
+    """
+    Возвращает дату и время в формате:
+    10 августа / 14:32
+    """
+
+    dt = datetime.fromisoformat(
+        value.replace("Z", "+00:00")
+    )
+
+    months = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ]
+
+    date_text = f"{dt.day} {months[dt.month - 1]}"
+    time_text = dt.strftime("%H:%M")
+
+    return date_text, time_text
+
+
+# =========================================================
+# РЕДАКТИРОВАНИЕ ГЛАВНОГО ЭКРАНА
 # =========================================================
 
 async def edit_screen(
@@ -70,13 +110,8 @@ async def edit_screen(
     character: str = "idle",
 ):
     """
-    Редактирует существующее сообщение бота.
-
-    Если это сообщение с фотографией —
-    меняем фотографию + caption.
-
-    Если это обычное сообщение —
-    заменяем его на фотографию.
+    Редактирует существующее сообщение с персонажем.
+    Новые сообщения от бота здесь не создаются.
     """
 
     image_path = CHARACTER_IMAGES.get(
@@ -87,9 +122,7 @@ async def edit_screen(
     try:
         photo = FSInputFile(image_path)
 
-        # Уже есть фото
         if message.photo:
-
             media = InputMediaPhoto(
                 media=photo,
                 caption=caption,
@@ -102,8 +135,6 @@ async def edit_screen(
             )
 
         else:
-            # Теоретически сюда попадать не должны,
-            # потому что главный экран всегда фото.
             await message.delete()
 
             new_message = await message.answer_photo(
@@ -117,7 +148,7 @@ async def edit_screen(
 
     except Exception as error:
         logging.error(
-            "Error editing screen: %s",
+            "Screen edit error: %s",
             error,
         )
 
@@ -125,15 +156,29 @@ async def edit_screen(
 
 
 # =========================================================
-# ПОЛУЧЕНИЕ ID ГЛАВНОГО СООБЩЕНИЯ
+# КЛАВИАТУРА ОДНОЙ ЗАПИСИ
 # =========================================================
 
-async def get_main_message_id(
-    state: FSMContext,
-):
-    data = await state.get_data()
+def coffee_detail_keyboard(
+    coffee_id: int,
+) -> InlineKeyboardMarkup:
 
-    return data.get("main_message_id")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"delete:{coffee_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="← История",
+                    callback_data="history",
+                )
+            ],
+        ]
+    )
 
 
 # =========================================================
@@ -146,7 +191,7 @@ async def show_main_screen(
     state: FSMContext,
     character: str = "idle",
 ):
-    coffees = get_today_coffees(
+    coffees = await get_today_coffees(
         telegram_id
     )
 
@@ -155,21 +200,15 @@ async def show_main_screen(
     if coffees:
         last = coffees[0]
 
-        created_at = datetime.fromisoformat(
-            last["created_at"].replace(
-                "Z",
-                "+00:00",
-            )
-        )
-
-        time_text = created_at.strftime(
-            "%H:%M"
+        date_text, time_text = format_datetime(
+            last["created_at"]
         )
 
         last_coffee = (
             f"<b>{last['coffee_name']}</b> · "
             f"{last['coffee_size']}\n"
-            f"📍 {last['coffee_shop']} · {time_text}"
+            f"📍 {last['coffee_shop']} · "
+            f"{time_text}"
         )
 
     else:
@@ -192,8 +231,6 @@ async def show_main_screen(
         character=character,
     )
 
-    # Если edit_screen создал новое сообщение,
-    # сохраняем его ID.
     if result:
         await state.update_data(
             main_message_id=result.message_id
@@ -213,7 +250,7 @@ async def start_handler(
 
     telegram_id = message.from_user.id
 
-    coffees = get_today_coffees(
+    coffees = await get_today_coffees(
         telegram_id
     )
 
@@ -222,21 +259,15 @@ async def start_handler(
     if coffees:
         last = coffees[0]
 
-        created_at = datetime.fromisoformat(
-            last["created_at"].replace(
-                "Z",
-                "+00:00",
-            )
-        )
-
-        time_text = created_at.strftime(
-            "%H:%M"
+        _, time_text = format_datetime(
+            last["created_at"]
         )
 
         last_coffee = (
             f"<b>{last['coffee_name']}</b> · "
             f"{last['coffee_size']}\n"
-            f"📍 {last['coffee_shop']} · {time_text}"
+            f"📍 {last['coffee_shop']} · "
+            f"{time_text}"
         )
 
     else:
@@ -261,14 +292,13 @@ async def start_handler(
         parse_mode=ParseMode.HTML,
     )
 
-    # Запоминаем главное сообщение
     await state.update_data(
         main_message_id=sent_message.message_id
     )
 
 
 # =========================================================
-# НАЗАД
+# НАЗАД НА ГЛАВНУЮ
 # =========================================================
 
 @dp.callback_query(
@@ -291,7 +321,7 @@ async def back_main_handler(
 
 
 # =========================================================
-# ДОБАВИТЬ КОФЕ
+# ДОБАВЛЕНИЕ КОФЕ
 # =========================================================
 
 @dp.callback_query(
@@ -303,7 +333,6 @@ async def add_coffee_start(
 ):
     await callback.answer()
 
-    # Сохраняем ID главного сообщения
     await state.update_data(
         main_message_id=callback.message.message_id
     )
@@ -354,14 +383,15 @@ async def coffee_name_handler(
         AddCoffee.coffee_size
     )
 
-    # Удаляем сообщение пользователя
     try:
         await message.delete()
     except Exception:
         pass
 
-    main_message_id = (
-        await get_main_message_id(state)
+    data = await state.get_data()
+
+    main_message_id = data.get(
+        "main_message_id"
     )
 
     if not main_message_id:
@@ -383,7 +413,7 @@ async def coffee_name_handler(
 
     except Exception as error:
         logging.error(
-            "Error after coffee name: %s",
+            "Coffee name error: %s",
             error,
         )
 
@@ -464,14 +494,14 @@ async def coffee_shop_handler(
     except Exception:
         pass
 
-    main_message_id = (
-        await get_main_message_id(state)
+    data = await state.get_data()
+
+    main_message_id = data.get(
+        "main_message_id"
     )
 
     if not main_message_id:
         return
-
-    data = await state.get_data()
 
     coffee_name = data.get(
         "coffee_name",
@@ -500,7 +530,7 @@ async def coffee_shop_handler(
 
     except Exception as error:
         logging.error(
-            "Error after coffee shop: %s",
+            "Coffee shop error: %s",
             error,
         )
 
@@ -558,20 +588,12 @@ async def rating_handler(
         )
         return
 
-    # Сохраняем кофе
-    add_coffee(
+    await add_coffee(
         telegram_id=callback.from_user.id,
         coffee_name=coffee_name,
         coffee_size=coffee_size,
         coffee_shop=coffee_shop,
         rating=rating,
-    )
-
-    await state.clear()
-
-    # Возвращаем ID главного сообщения
-    await state.update_data(
-        main_message_id=callback.message.message_id
     )
 
     await callback.answer(
@@ -602,9 +624,15 @@ async def rating_handler(
         character="happy",
     )
 
+    await state.clear()
+
+    await state.update_data(
+        main_message_id=callback.message.message_id
+    )
+
 
 # =========================================================
-# СТАТИСТИКА — ПОКА ЗАГЛУШКА
+# СТАТИСТИКА
 # =========================================================
 
 @dp.callback_query(
@@ -615,16 +643,43 @@ async def statistics_handler(
 ):
     await callback.answer()
 
-    caption = (
-        "📊 <b>Статистика</b>\n\n"
-        "Сейчас собираем твою кофейную историю.\n\n"
-        "Здесь появятся:\n"
-        "☕ количество кофе\n"
-        "🏪 любимые кофейни\n"
-        "⭐ средняя оценка\n"
-        "📏 любимый размер\n"
-        "☕ любимый напиток"
+    stats = await get_statistics(
+        callback.from_user.id
     )
+
+    if stats["total"] == 0:
+
+        caption = (
+            "📊 <b>Статистика</b>\n\n"
+            "Пока здесь пусто.\n\n"
+            "Добавь первый кофе ☕️"
+        )
+
+    else:
+
+        if stats["average_rating"] is not None:
+            average_rating = (
+                f"⭐️ {stats['average_rating']}/5"
+            )
+        else:
+            average_rating = (
+                "⭐️ Нет оценок"
+            )
+
+        caption = (
+            "📊 <b>Статистика</b>\n\n"
+            f"☕️ Всего кофе — "
+            f"<b>{stats['total']}</b>\n\n"
+            f"☕ Любимый кофе\n"
+            f"<b>{stats['favorite_coffee']}</b>\n\n"
+            f"🏪 Любимая кофейня\n"
+            f"<b>{stats['favorite_shop']}</b>\n\n"
+            f"📏 Любимый размер\n"
+            f"<b>{stats['favorite_size']}</b>\n\n"
+            f"🏪 Кофеен посещено — "
+            f"<b>{stats['shops_count']}</b>\n\n"
+            f"{average_rating}"
+        )
 
     await edit_screen(
         message=callback.message,
@@ -635,7 +690,7 @@ async def statistics_handler(
 
 
 # =========================================================
-# ИСТОРИЯ — ПОКА ЗАГЛУШКА
+# ИСТОРИЯ
 # =========================================================
 
 @dp.callback_query(
@@ -646,15 +701,241 @@ async def history_handler(
 ):
     await callback.answer()
 
-    caption = (
-        "📖 <b>История</b>\n\n"
-        "История кофе появится здесь."
+    coffees = await get_all_coffees(
+        callback.from_user.id
+    )
+
+    if not coffees:
+
+        caption = (
+            "📖 <b>История</b>\n\n"
+            "Здесь пока ничего нет.\n\n"
+            "Добавь свой первый кофе ☕️"
+        )
+
+        await edit_screen(
+            message=callback.message,
+            caption=caption,
+            keyboard=back_keyboard(),
+            character="sitting",
+        )
+
+        return
+
+    # Берём последние 10 записей
+    coffees = coffees[:10]
+
+    lines = [
+        "📖 <b>История</b>",
+        "",
+    ]
+
+    current_date = None
+
+    for coffee in coffees:
+
+        date_text, time_text = format_datetime(
+            coffee["created_at"]
+        )
+
+        if date_text != current_date:
+
+            if current_date is not None:
+                lines.append("")
+
+            lines.append(
+                f"<b>{date_text}</b>"
+            )
+
+            current_date = date_text
+
+        rating = coffee.get(
+            "rating"
+        )
+
+        if rating:
+            rating_text = (
+                f" · ⭐️ {rating}"
+            )
+        else:
+            rating_text = ""
+
+        lines.append(
+            f"{time_text} · "
+            f"<b>{coffee['coffee_name']}</b> · "
+            f"{coffee['coffee_size']}"
+        )
+
+        lines.append(
+            f"📍 {coffee['coffee_shop']}"
+            f"{rating_text}"
+        )
+
+        lines.append(
+            f"   ID: {coffee['id']}"
+        )
+
+    lines.append("")
+    lines.append(
+        "<i>Нажми ID записи, чтобы удалить её.</i>"
+    )
+
+    caption = "\n".join(lines)
+
+    # Создаём кнопки удаления
+    buttons = []
+
+    for coffee in coffees:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"🗑 {coffee['coffee_name']} "
+                    f"· {coffee['coffee_size']}"
+                ),
+                callback_data=f"delete:{coffee['id']}",
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="← Назад",
+            callback_data="back_main",
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=buttons
     )
 
     await edit_screen(
         message=callback.message,
         caption=caption,
-        keyboard=back_keyboard(),
+        keyboard=keyboard,
+        character="sitting",
+    )
+
+
+# =========================================================
+# УДАЛЕНИЕ
+# =========================================================
+
+@dp.callback_query(
+    F.data.startswith("delete:")
+)
+async def delete_handler(
+    callback: CallbackQuery,
+):
+    coffee_id = int(
+        callback.data.split(":")[1]
+    )
+
+    await delete_coffee(
+        telegram_id=callback.from_user.id,
+        coffee_id=coffee_id,
+    )
+
+    await callback.answer(
+        "Запись удалена 🗑"
+    )
+
+    # Возвращаем историю
+    coffees = await get_all_coffees(
+        callback.from_user.id
+    )
+
+    if not coffees:
+
+        caption = (
+            "📖 <b>История</b>\n\n"
+            "История пока пуста."
+        )
+
+        await edit_screen(
+            message=callback.message,
+            caption=caption,
+            keyboard=back_keyboard(),
+            character="sitting",
+        )
+
+        return
+
+    coffees = coffees[:10]
+
+    lines = [
+        "📖 <b>История</b>",
+        "",
+    ]
+
+    current_date = None
+
+    for coffee in coffees:
+
+        date_text, time_text = format_datetime(
+            coffee["created_at"]
+        )
+
+        if date_text != current_date:
+
+            if current_date is not None:
+                lines.append("")
+
+            lines.append(
+                f"<b>{date_text}</b>"
+            )
+
+            current_date = date_text
+
+        rating = coffee.get(
+            "rating"
+        )
+
+        rating_text = (
+            f" · ⭐️ {rating}"
+            if rating
+            else ""
+        )
+
+        lines.append(
+            f"{time_text} · "
+            f"<b>{coffee['coffee_name']}</b> · "
+            f"{coffee['coffee_size']}"
+        )
+
+        lines.append(
+            f"📍 {coffee['coffee_shop']}"
+            f"{rating_text}"
+        )
+
+    caption = "\n".join(lines)
+
+    buttons = []
+
+    for coffee in coffees:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"🗑 {coffee['coffee_name']} "
+                    f"· {coffee['coffee_size']}"
+                ),
+                callback_data=f"delete:{coffee['id']}",
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="← Назад",
+            callback_data="back_main",
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=buttons
+    )
+
+    await edit_screen(
+        message=callback.message,
+        caption=caption,
+        keyboard=keyboard,
         character="sitting",
     )
 
@@ -664,6 +945,7 @@ async def history_handler(
 # =========================================================
 
 async def main():
+
     logging.info(
         "☕ Coffee Diary bot started"
     )
