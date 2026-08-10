@@ -11,7 +11,6 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     Message,
@@ -22,6 +21,7 @@ from aiogram.types import (
 )
 
 from config import BOT_TOKEN
+
 from database import (
     add_coffee,
     get_today_coffees,
@@ -29,6 +29,15 @@ from database import (
     get_statistics,
     delete_coffee,
 )
+
+from keyboards import (
+    main_keyboard,
+    coffee_size_keyboard,
+    rating_keyboard,
+    back_keyboard,
+)
+
+from states import AddCoffee
 
 
 # =========================================================
@@ -56,21 +65,11 @@ dp = Dispatcher()
 
 
 # =========================================================
-# STATES
-# =========================================================
-
-class AddCoffee(StatesGroup):
-    coffee_name = State()
-    coffee_size = State()
-    coffee_shop = State()
-    rating = State()
-
-
-# =========================================================
 # PATHS
 # =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent
+
 ASSETS_PATH = BASE_DIR / "assets"
 
 
@@ -79,16 +78,17 @@ ASSETS_PATH = BASE_DIR / "assets"
 # =========================================================
 #
 # ВАЖНО:
-# Файлы должны лежать в:
+# Названия должны полностью совпадать
+# с файлами в папке assets.
 #
-# assets/
+# Linux различает регистр.
 #
-# и иметь именно такие имена.
+# Например:
 #
-# Linux на Render различает регистр букв.
+# Drinking.jpeg
+# drinking.jpeg
 #
-# Если твои файлы называются иначе —
-# измени только значения справа.
+# это разные файлы.
 # =========================================================
 
 CHARACTER_IMAGES = {
@@ -103,16 +103,18 @@ CHARACTER_IMAGES = {
 
 
 # =========================================================
-# IMAGE LOADER
+# LOAD CHARACTER IMAGE
 # =========================================================
 
 def load_character_image(character: str) -> BufferedInputFile:
+
     image_path = CHARACTER_IMAGES.get(
         character,
         CHARACTER_IMAGES["idle"],
     )
 
     if not image_path.exists():
+
         logging.error(
             "Character image not found: %s",
             image_path,
@@ -132,116 +134,6 @@ def load_character_image(character: str) -> BufferedInputFile:
 
 
 # =========================================================
-# KEYBOARDS
-# =========================================================
-
-def main_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="☕️ Добавить кофе",
-                    callback_data="add_coffee",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📖 История",
-                    callback_data="history",
-                ),
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data="statistics",
-                ),
-            ],
-        ]
-    )
-
-
-def back_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="← Назад",
-                    callback_data="back_main",
-                )
-            ]
-        ]
-    )
-
-
-def coffee_size_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="S",
-                    callback_data="size:S",
-                ),
-                InlineKeyboardButton(
-                    text="M",
-                    callback_data="size:M",
-                ),
-                InlineKeyboardButton(
-                    text="L",
-                    callback_data="size:L",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← Назад",
-                    callback_data="back_main",
-                )
-            ],
-        ]
-    )
-
-
-def rating_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⭐️ 1",
-                    callback_data="rating:1",
-                ),
-                InlineKeyboardButton(
-                    text="⭐️ 2",
-                    callback_data="rating:2",
-                ),
-                InlineKeyboardButton(
-                    text="⭐️ 3",
-                    callback_data="rating:3",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⭐️ 4",
-                    callback_data="rating:4",
-                ),
-                InlineKeyboardButton(
-                    text="⭐️ 5",
-                    callback_data="rating:5",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Без оценки",
-                    callback_data="rating:none",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← Назад",
-                    callback_data="back_main",
-                )
-            ],
-        ]
-    )
-
-
-# =========================================================
 # EDIT SCREEN
 # =========================================================
 
@@ -251,10 +143,30 @@ async def edit_screen(
     keyboard=None,
     character: str = "idle",
 ):
-    try:
-        photo = load_character_image(character)
+    """
+    Меняет экран бота.
 
-        if message.photo:
+    Основной вариант:
+    редактируем существующее фото-сообщение.
+
+    Если Telegram не позволяет заменить media,
+    пробуем хотя бы изменить caption.
+
+    Если это невозможно —
+    удаляем старое сообщение и создаём новое.
+    """
+
+    photo = load_character_image(character)
+
+    # -----------------------------------------------------
+    # ВАРИАНТ 1
+    # Сообщение является фотографией
+    # -----------------------------------------------------
+
+    if message.photo:
+
+        try:
+
             media = InputMediaPhoto(
                 media=photo,
                 caption=caption,
@@ -266,9 +178,59 @@ async def edit_screen(
                 reply_markup=keyboard,
             )
 
+            logging.info(
+                "Screen successfully changed. Character=%s",
+                character,
+            )
+
             return message
 
-        await message.delete()
+        except Exception as error:
+
+            logging.exception(
+                "edit_media failed: %s",
+                error,
+            )
+
+            # -------------------------------------------------
+            # FALLBACK:
+            # пробуем изменить только caption
+            # -------------------------------------------------
+
+            try:
+
+                await message.edit_caption(
+                    caption=caption,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                )
+
+                logging.info(
+                    "Screen caption successfully changed. "
+                    "Character=%s",
+                    character,
+                )
+
+                return message
+
+            except Exception as caption_error:
+
+                logging.exception(
+                    "edit_caption also failed: %s",
+                    caption_error,
+                )
+
+    # -----------------------------------------------------
+    # ВАРИАНТ 2
+    # Создаём новое сообщение
+    # -----------------------------------------------------
+
+    try:
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
         new_message = await message.answer_photo(
             photo=photo,
@@ -277,11 +239,17 @@ async def edit_screen(
             parse_mode=ParseMode.HTML,
         )
 
+        logging.info(
+            "New screen message created. Character=%s",
+            character,
+        )
+
         return new_message
 
     except Exception as error:
+
         logging.exception(
-            "Screen edit error: %s",
+            "Creating new screen failed: %s",
             error,
         )
 
@@ -289,10 +257,11 @@ async def edit_screen(
 
 
 # =========================================================
-# DATE
+# FORMAT DATE
 # =========================================================
 
-def format_datetime(value: str):
+def format_datetime(value: str) -> tuple[str, str]:
+
     dt = datetime.fromisoformat(
         value.replace("Z", "+00:00")
     )
@@ -312,7 +281,11 @@ def format_datetime(value: str):
         "декабря",
     ]
 
-    date_text = f"{dt.day} {months[dt.month - 1]}"
+    date_text = (
+        f"{dt.day} "
+        f"{months[dt.month - 1]}"
+    )
+
     time_text = dt.strftime("%H:%M")
 
     return date_text, time_text
@@ -328,6 +301,7 @@ async def show_main_screen(
     state: FSMContext,
     character: str = "idle",
 ):
+
     coffees = await get_today_coffees(
         telegram_id
     )
@@ -335,6 +309,7 @@ async def show_main_screen(
     count = len(coffees)
 
     if coffees:
+
         last = coffees[0]
 
         _, time_text = format_datetime(
@@ -349,6 +324,7 @@ async def show_main_screen(
         )
 
     else:
+
         last_coffee = (
             "Сегодня кофе ещё не было."
         )
@@ -382,6 +358,7 @@ async def start_handler(
     message: Message,
     state: FSMContext,
 ):
+
     await state.clear()
 
     telegram_id = message.from_user.id
@@ -393,6 +370,7 @@ async def start_handler(
     count = len(coffees)
 
     if coffees:
+
         last = coffees[0]
 
         _, time_text = format_datetime(
@@ -407,6 +385,7 @@ async def start_handler(
         )
 
     else:
+
         last_coffee = (
             "Сегодня кофе ещё не было."
         )
@@ -444,6 +423,7 @@ async def back_main_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     await callback.answer()
 
     await state.clear()
@@ -467,6 +447,7 @@ async def add_coffee_start(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     await callback.answer()
 
     await state.update_data(
@@ -484,11 +465,15 @@ async def add_coffee_start(
         "флэт уайт, эспрессо</i>"
     )
 
-    await edit_screen(
+    result = await edit_screen(
         message=callback.message,
         caption=caption,
         keyboard=back_keyboard(),
         character="holding_coffee",
+    )
+
+    await state.update_data(
+        main_message_id=result.message_id
     )
 
 
@@ -503,6 +488,7 @@ async def coffee_name_handler(
     message: Message,
     state: FSMContext,
 ):
+
     if not message.text:
         return
 
@@ -532,7 +518,7 @@ async def coffee_name_handler(
 
     if not main_message_id:
         logging.error(
-            "main_message_id not found"
+            "main_message_id missing after coffee name"
         )
         return
 
@@ -542,6 +528,7 @@ async def coffee_name_handler(
     )
 
     try:
+
         await bot.edit_message_caption(
             chat_id=message.chat.id,
             message_id=main_message_id,
@@ -551,6 +538,7 @@ async def coffee_name_handler(
         )
 
     except Exception as error:
+
         logging.exception(
             "Coffee size screen error: %s",
             error,
@@ -560,21 +548,6 @@ async def coffee_name_handler(
 # =========================================================
 # COFFEE SIZE
 # =========================================================
-#
-# ВАЖНО:
-# Здесь обработка сделана максимально прямо.
-#
-# Кнопка:
-#
-# S -> size:S
-# M -> size:M
-# L -> size:L
-#
-# После нажатия:
-# 1. сохраняем размер
-# 2. меняем FSM state
-# 3. показываем следующий экран
-# =========================================================
 
 @dp.callback_query(
     F.data.startswith("size:")
@@ -583,42 +556,43 @@ async def coffee_size_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
+    # -----------------------------------------------------
+    # Получаем размер
+    # -----------------------------------------------------
+
+    size = callback.data.split(":", 1)[1].strip()
+
     logging.info(
-        "Coffee size callback received: %s",
-        callback.data,
+        "Coffee size selected: %s",
+        size,
     )
 
-    try:
-        size = callback.data.split(
-            ":",
-            1,
-        )[1].strip()
-
-    except Exception:
-        await callback.answer(
-            "Ошибка выбора размера",
-            show_alert=True,
-        )
-        return
-
-    if size not in {
-        "S",
-        "M",
-        "L",
-    }:
-        await callback.answer(
-            "Неизвестный размер",
-            show_alert=True,
-        )
-        return
+    # -----------------------------------------------------
+    # Сохраняем размер
+    # -----------------------------------------------------
 
     await state.update_data(
         coffee_size=size
     )
 
+    # -----------------------------------------------------
+    # Переходим к кофейне
+    # -----------------------------------------------------
+
     await state.set_state(
         AddCoffee.coffee_shop
     )
+
+    # -----------------------------------------------------
+    # Убираем стандартное уведомление Telegram
+    # -----------------------------------------------------
+
+    await callback.answer()
+
+    # -----------------------------------------------------
+    # Получаем данные
+    # -----------------------------------------------------
 
     data = await state.get_data()
 
@@ -627,15 +601,31 @@ async def coffee_size_handler(
         "Кофе",
     )
 
+    # -----------------------------------------------------
+    # Следующий экран
+    # -----------------------------------------------------
+
     caption = (
         f"☕️ <b>{coffee_name} · {size}</b>\n\n"
         "В какой кофейне ты его пил?\n\n"
         "<i>Напиши название кофейни</i>"
     )
 
-    await callback.answer(
-        f"Размер {size} выбран ☕️"
+    logging.info(
+        "Changing screen after size selection: "
+        "name=%s size=%s",
+        coffee_name,
+        size,
     )
+
+    # -----------------------------------------------------
+    # ВАЖНО:
+    # напрямую вызываем edit_screen.
+    #
+    # Если Telegram не сможет заменить картинку,
+    # edit_screen попробует изменить caption,
+    # а затем создаст новое сообщение.
+    # -----------------------------------------------------
 
     result = await edit_screen(
         message=callback.message,
@@ -644,13 +634,17 @@ async def coffee_size_handler(
         character="drinking",
     )
 
+    # -----------------------------------------------------
+    # Сохраняем ID актуального сообщения
+    # -----------------------------------------------------
+
     await state.update_data(
         main_message_id=result.message_id
     )
 
     logging.info(
-        "Coffee size selected successfully: %s",
-        size,
+        "Coffee size step completed. "
+        "Next state: coffee_shop"
     )
 
 
@@ -665,6 +659,7 @@ async def coffee_shop_handler(
     message: Message,
     state: FSMContext,
 ):
+
     if not message.text:
         return
 
@@ -693,6 +688,9 @@ async def coffee_shop_handler(
     )
 
     if not main_message_id:
+        logging.error(
+            "main_message_id missing at coffee shop step"
+        )
         return
 
     coffee_name = data.get(
@@ -706,13 +704,13 @@ async def coffee_shop_handler(
     )
 
     caption = (
-        f"☕️ <b>{coffee_name} · "
-        f"{coffee_size}</b>\n"
+        f"☕️ <b>{coffee_name} · {coffee_size}</b>\n"
         f"📍 {coffee_shop}\n\n"
         "Как оценишь кофе?"
     )
 
     try:
+
         await bot.edit_message_caption(
             chat_id=message.chat.id,
             message_id=main_message_id,
@@ -722,8 +720,9 @@ async def coffee_shop_handler(
         )
 
     except Exception as error:
+
         logging.exception(
-            "Coffee rating screen error: %s",
+            "Coffee shop screen error: %s",
             error,
         )
 
@@ -739,22 +738,16 @@ async def rating_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     value = callback.data.split(
         ":",
-        1,
+        1
     )[1]
 
     if value == "none":
         rating = None
     else:
-        try:
-            rating = int(value)
-        except ValueError:
-            await callback.answer(
-                "Некорректная оценка",
-                show_alert=True,
-            )
-            return
+        rating = int(value)
 
     data = await state.get_data()
 
@@ -771,56 +764,56 @@ async def rating_handler(
     )
 
     if not coffee_name:
+
         await callback.answer(
             "Не найдено название кофе.",
             show_alert=True,
         )
+
         return
 
     if not coffee_size:
+
         await callback.answer(
             "Не найден размер.",
             show_alert=True,
         )
+
         return
 
     if not coffee_shop:
+
         await callback.answer(
             "Не найдена кофейня.",
             show_alert=True,
         )
+
         return
 
-    try:
-        await add_coffee(
-            telegram_id=callback.from_user.id,
-            coffee_name=coffee_name,
-            coffee_size=coffee_size,
-            coffee_shop=coffee_shop,
-            rating=rating,
-        )
+    # -----------------------------------------------------
+    # SAVE COFFEE
+    # -----------------------------------------------------
 
-    except Exception as error:
-        logging.exception(
-            "Database add coffee error: %s",
-            error,
-        )
-
-        await callback.answer(
-            "Не удалось сохранить кофе.",
-            show_alert=True,
-        )
-        return
+    await add_coffee(
+        telegram_id=callback.from_user.id,
+        coffee_name=coffee_name,
+        coffee_size=coffee_size,
+        coffee_shop=coffee_shop,
+        rating=rating,
+    )
 
     await callback.answer(
         "Кофе записан ☕️"
     )
 
     if rating:
+
         rating_text = (
             f"⭐️ {rating}/5"
         )
+
     else:
+
         rating_text = (
             "Без оценки"
         )
@@ -857,22 +850,12 @@ async def rating_handler(
 async def statistics_handler(
     callback: CallbackQuery,
 ):
+
     await callback.answer()
 
-    try:
-        stats = await get_statistics(
-            callback.from_user.id
-        )
-    except Exception as error:
-        logging.exception(
-            "Statistics error: %s",
-            error,
-        )
-
-        await callback.message.answer(
-            "Не удалось загрузить статистику."
-        )
-        return
+    stats = await get_statistics(
+        callback.from_user.id
+    )
 
     if stats["total"] == 0:
 
@@ -885,11 +868,14 @@ async def statistics_handler(
     else:
 
         if stats["average_rating"] is not None:
+
             average_rating = (
                 f"⭐️ "
                 f"{stats['average_rating']}/5"
             )
+
         else:
+
             average_rating = (
                 "⭐️ Нет оценок"
             )
@@ -925,6 +911,7 @@ async def render_history(
     message: Message,
     telegram_id: int,
 ):
+
     coffees = await get_all_coffees(
         telegram_id
     )
@@ -1000,30 +987,25 @@ async def render_history(
 
     for coffee in coffees:
 
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=(
-                        f"🗑 "
-                        f"{coffee['coffee_name']} "
-                        f"· "
-                        f"{coffee['coffee_size']}"
-                    ),
-                    callback_data=(
-                        f"delete:{coffee['id']}"
-                    ),
-                )
-            ]
-        )
-
-    buttons.append(
-        [
+        buttons.append([
             InlineKeyboardButton(
-                text="← Назад",
-                callback_data="back_main",
+                text=(
+                    f"🗑 "
+                    f"{coffee['coffee_name']} "
+                    f"· {coffee['coffee_size']}"
+                ),
+                callback_data=(
+                    f"delete:{coffee['id']}"
+                ),
             )
-        ]
-    )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="← Назад",
+            callback_data="back_main",
+        )
+    ])
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=buttons
@@ -1047,6 +1029,7 @@ async def render_history(
 async def history_handler(
     callback: CallbackQuery,
 ):
+
     await callback.answer()
 
     await render_history(
@@ -1065,38 +1048,29 @@ async def history_handler(
 async def delete_handler(
     callback: CallbackQuery,
 ):
+
     try:
+
         coffee_id = int(
             callback.data.split(
                 ":",
-                1,
+                1
             )[1]
         )
+
     except Exception:
+
         await callback.answer(
             "Ошибка удаления.",
             show_alert=True,
         )
-        return
-
-    try:
-        await delete_coffee(
-            telegram_id=callback.from_user.id,
-            coffee_id=coffee_id,
-        )
-
-    except Exception as error:
-        logging.exception(
-            "Delete coffee error: %s",
-            error,
-        )
-
-        await callback.answer(
-            "Не удалось удалить запись.",
-            show_alert=True,
-        )
 
         return
+
+    await delete_coffee(
+        telegram_id=callback.from_user.id,
+        coffee_id=coffee_id,
+    )
 
     await callback.answer(
         "Запись удалена 🗑"
@@ -1113,10 +1087,11 @@ async def delete_handler(
 # =========================================================
 
 async def health_handler(
-    request: web.Request,
+    request: web.Request
 ):
+
     return web.Response(
-        text="Coffee Diary bot is running",
+        text="Coffee Diary bot is running ☕️",
         status=200,
     )
 
@@ -1142,7 +1117,9 @@ async def start_web_server():
         health_handler,
     )
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(
+        app
+    )
 
     await runner.setup()
 
@@ -1155,7 +1132,8 @@ async def start_web_server():
     await site.start()
 
     logging.info(
-        "HTTP health server started on port %s",
+        "HTTP health server started "
+        "on port %s",
         port,
     )
 
@@ -1172,6 +1150,7 @@ async def main():
         "☕ Coffee Diary bot started"
     )
 
+    # Render Web Service должен видеть открытый порт.
     web_runner = await start_web_server()
 
     try:
@@ -1201,4 +1180,5 @@ async def main():
 # =========================================================
 
 if __name__ == "__main__":
+
     asyncio.run(main())
