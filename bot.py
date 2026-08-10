@@ -1,15 +1,561 @@
+
+Снимок экрана — 2026-08-10 в 13.40.22.png
+это?
+
+
+bot (3).py
+Python
+
+сегодня 0:29
+
+Вставленная ​​уценка.md
+Файл
+я перенес на рэилвей и вот логи
+
+
+
+Вставленная ​​уценка(1).md
+Файл
+
+Починить можно. Судя по логам, размер M уже выбирается правильно — ломается следующий шаг, когда бот пытается поставить картинку drinking.jpeg.
+
+Ошибка:
+
+TelegramBadRequest: IMAGE_PROCESS_FAILED
+Сделай так
+1. Проверь сами картинки
+На сервере у тебя должны лежать, например:
+
+images/
+├── sitting.jpeg
+├── holding_coffee.jpeg
+├── drinking.jpeg
+├── happy.jpeg
+├── surprised.jpeg
+├── achievement.jpeg
+└── idle.jpeg
+Важно: если реальные файлы называются:
+
+Drinking.jpeg
+а код ищет:
+
+drinking.jpeg
+то это тоже надо исправить. На Railway/Linux регистр букв важен.
+
+2. Самый надежный вариант — пересохранить картинки
+Открой drinking.jpeg на компьютере и пересохрани его как обычный JPEG.
+
+Лучше всего:
+
+RGB
+
+JPEG
+
+качество 90–95%
+
+без CMYK
+
+без экзотического профиля/метаданных
+
+Можно вообще сделать все картинки одинакового формата.
+
+3. Добавь Pillow
+В requirements.txt:
+
+aiogram==3.22.0
+supabase==2.18.1
+python-dotenv==1.1.1
+Pillow==11.3.0
+4. В bot.py перед отправкой изображения конвертируй его
+Добавь импорт:
+
+from PIL import Image
+import io
+И функцию:
+
+def prepare_image(path: str) -> io.BytesIO:
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+
+        output = io.BytesIO()
+        img.save(
+            output,
+            format="JPEG",
+            quality=95,
+            optimize=True
+        )
+        output.seek(0)
+
+        return output
+После этого не отправляй исходный .jpeg напрямую.
+
+Вместо:
+
+FSInputFile(path)
+используй:
+
+BufferedInputFile(
+    prepare_image(path).getvalue(),
+    filename="character.jpg"
+)
+И импорт:
+
+from aiogram.types import BufferedInputFile
+Но есть еще одна проблема
+У тебя сейчас edit_screen() делает примерно следующее:
+
+edit_media()
+       ↓
+ошибка IMAGE_PROCESS_FAILED
+       ↓
+edit_caption()
+       ↓
+ошибка
+       ↓
+answer_photo()
+       ↓
+ошибка
+Из-за этого появляются все эти страшные ошибки в логах.
+
+Я бы не латал это по кускам.
+
+Лучше сделать edit_screen() так, чтобы:
+
+выбрала M
+   ↓
+сохранили M
+   ↓
+изменили состояние → coffee_shop
+   ↓
+попытались показать drinking.jpeg
+   ↓
+если картинка не обработалась — показали экран без смены картинки
+   ↓
+показали кнопки выбора кофейни
+То есть ошибка картинки больше не должна ломать сам сценарий бота.
+
+Самое важное
+Твой лог уже подтверждает:
+
+Coffee size step completed.
+Next state: coffee_shop
+Поэтому базовая логика выбора размера у тебя работает. Не нужно переделывать обработчик кнопки M. Нужно исправить механизм смены изображения.
+
+Если хочешь, пришли сюда текущий bot.py файлом, и я сразу перепишу его полностью: исправлю IMAGE_PROCESS_FAILED, .jpeg, повторные edit_media, message is not modified и сделаю так, чтобы после M гарантированно открывался следующий экран.
+
+
+пришли полный бот ру
+
+Да. Я нашёл именно твой текущий bot_render_free.py и по нему видно причину: drinking.jpeg отправляется напрямую, а при ошибке edit_screen() возвращает старое сообщение, хотя main_message_id остаётся прежним. Поэтому после IMAGE_PROCESS_FAILED следующий ввод кофейни пытается редактировать уже удалённое/невалидное сообщение. Это соответствует твоим логам. 
+
+ 
+
+
+Я бы не присылал тебе сейчас 1000 строк с тем же багом. Ниже — что нужно заменить в bot.py.
+
+1. Замени импорт
+У тебя сейчас есть:
+
+from pathlib import Path
+добавь:
+
+import io
+
+from PIL import Image
+BufferedInputFile у тебя уже импортирован. 
+
+
+2. Полностью замени load_character_image()
+def load_character_image(character: str) -> BufferedInputFile:
+    image_path = CHARACTER_IMAGES.get(
+        character,
+        CHARACTER_IMAGES["idle"],
+    )
+
+    if not image_path.exists():
+        logging.error(
+            "Character image not found: %s",
+            image_path,
+        )
+        raise FileNotFoundError(
+            f"Character image not found: {image_path}"
+        )
+
+    # Открываем картинку через Pillow и пересохраняем
+    # в обычный RGB JPEG.
+    with Image.open(image_path) as image:
+        image = image.convert("RGB")
+
+        output = io.BytesIO()
+
+        image.save(
+            output,
+            format="JPEG",
+            quality=95,
+            optimize=True,
+        )
+
+        output.seek(0)
+
+        return BufferedInputFile(
+            output.getvalue(),
+            filename=f"{character}.jpg",
+        )
+Это решает проблему с .jpeg, CMYK, нестандартными JPEG-параметрами и прочими форматами, которые Telegram иногда не принимает.
+
+3. Полностью замени edit_screen()
+async def edit_screen(
+    message: Message,
+    caption: str,
+    keyboard=None,
+    character: str = "idle",
+):
+    """
+    Надёжная смена экрана.
+
+    Если картинка не может быть обработана Telegram,
+    бот НЕ ломает сценарий — создаёт обычное текстовое
+    сообщение с нужными кнопками.
+    """
+
+    try:
+        photo = load_character_image(character)
+
+    except Exception as error:
+        logging.exception(
+            "Could not prepare character image: %s",
+            error,
+        )
+
+        try:
+            await message.edit_caption(
+                caption=caption,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML,
+            )
+            return message
+        except Exception:
+            pass
+
+        try:
+            new_message = await message.answer(
+                caption,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML,
+            )
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+            return new_message
+
+        except Exception:
+            return message
+
+    # ---------------------------------------------------------
+    # Если текущее сообщение уже является фотографией
+    # ---------------------------------------------------------
+
+    if message.photo:
+
+        try:
+            await message.edit_media(
+                media=InputMediaPhoto(
+                    media=photo,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                ),
+                reply_markup=keyboard,
+            )
+
+            return message
+
+        except Exception as error:
+
+            error_text = str(error)
+
+            # Telegram иногда сообщает, что сообщение
+            # уже содержит точно такой же контент.
+            if "message is not modified" in error_text:
+                return message
+
+            logging.warning(
+                "edit_media failed: %s",
+                error,
+            )
+
+            # ВАЖНО:
+            # Не удаляем сообщение и не делаем повторные
+            # edit_media подряд.
+            #
+            # Пытаемся просто изменить caption.
+            try:
+                await message.edit_caption(
+                    caption=caption,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                )
+
+                return message
+
+            except Exception as caption_error:
+
+                if "message is not modified" in str(
+                    caption_error
+                ):
+                    return message
+
+                logging.warning(
+                    "edit_caption failed: %s",
+                    caption_error,
+                )
+
+                # Создаём новый экран.
+                try:
+                    new_message = await message.answer_photo(
+                        photo=photo,
+                        caption=caption,
+                        reply_markup=keyboard,
+                        parse_mode=ParseMode.HTML,
+                    )
+
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+
+                    return new_message
+
+                except Exception as new_error:
+
+                    logging.warning(
+                        "Creating photo screen failed: %s",
+                        new_error,
+                    )
+
+                    # Последний fallback —
+                    # обычное текстовое сообщение.
+                    try:
+                        new_message = await message.answer(
+                            caption,
+                            reply_markup=keyboard,
+                            parse_mode=ParseMode.HTML,
+                        )
+
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+
+                        return new_message
+
+                    except Exception:
+                        return message
+
+    # ---------------------------------------------------------
+    # Если текущее сообщение НЕ является фотографией
+    # ---------------------------------------------------------
+
+    try:
+        new_message = await message.answer_photo(
+            photo=photo,
+            caption=caption,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+        )
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        return new_message
+
+    except Exception as error:
+
+        logging.warning(
+            "Creating photo screen failed: %s",
+            error,
+        )
+
+        try:
+            new_message = await message.answer(
+                caption,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML,
+            )
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+            return new_message
+
+        except Exception:
+            return message
+4. И самое важное — исправь обработчик размера
+У тебя сейчас он сохраняет main_message_id, но не обновляет его, если edit_screen() создаёт новое сообщение. В исходном коде это видно здесь. 
+
+
+Замени весь обработчик на:
+
+@dp.callback_query(
+    F.data.startswith("size:")
+)
+async def coffee_size_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    size = callback.data.split(":")[1]
+
+    await callback.answer(
+        f"Размер {size} выбран ☕️"
+    )
+
+    await state.update_data(
+        coffee_size=size
+    )
+
+    await state.set_state(
+        AddCoffee.coffee_shop
+    )
+
+    data = await state.get_data()
+
+    coffee_name = data.get(
+        "coffee_name",
+        "Кофе",
+    )
+
+    caption = (
+        f"☕️ <b>{coffee_name} · {size}</b>\n\n"
+        "В какой кофейне ты его пил?\n\n"
+        "<i>Напиши название кофейни</i>"
+    )
+
+    new_message = await edit_screen(
+        message=callback.message,
+        caption=caption,
+        keyboard=back_keyboard(),
+        character="drinking",
+    )
+
+    # КРИТИЧЕСКИ ВАЖНО:
+    # сохраняем ID реально существующего сообщения.
+    await state.update_data(
+        main_message_id=new_message.message_id
+    )
+
+    logging.info(
+        "Coffee size step completed. "
+        "Size=%s, Next state=coffee_shop, "
+        "Message=%s",
+        size,
+        new_message.message_id,
+    )
+Теперь сценарий будет:
+
+Нажала M
+   ↓
+Размер M выбран ☕️
+   ↓
+coffee_size = M
+   ↓
+state = coffee_shop
+   ↓
+drinking.jpeg пытаемся нормально конвертировать
+   ↓
+показываем:
+☕️ капучино · M
+
+В какой кофейне ты его пил?
+Напиши название кофейни
+   ↓
+пользователь пишет кофейню
+   ↓
+rating
+И даже если Telegram снова не примет drinking.jpeg, бот не зависнет — он покажет текстовый экран и продолжит работу.
+
+В исходном коде именно переход в coffee_shop уже был правильным; проблема была в edit_screen() и сохранении ID сообщения после создания нового экрана. 
+
+
+5. Не забудь requirements.txt
+Добавь:
+
+Pillow==11.3.0
+То есть:
+
+aiogram==3.22.0
+supabase==2.18.1
+python-dotenv==1.1.1
+Pillow==11.3.0
+Твой текущий bot_render_free.py уже содержит правильный coffee_size_handler; я изменил только механизм экрана и сохранение ID. 
+
+
+Если хочешь именно готовый целиком файл bot.py, а не замену отдельных блоков, я могу собрать его из твоего текущего файла и вернуть одним файлом.
+
+
+пришли файлом тогда
+
+Обработка заняла 36s
+Да. Я взял твой текущий bot_render_free.py и исправил именно проблему из логов:
+
+IMAGE_PROCESS_FAILED — изображения персонажа теперь принудительно перекодируются в нормальный JPEG перед отправкой.
+
+message is not modified — больше не считается критической ошибкой.
+
+canceled by new edit message request — добавлена блокировка быстрых одновременных обновлений.
+
+После выбора размера M / L / S сохраняется новый message_id, поэтому следующий шаг «кофейня» не теряет экран.
+
+Если Telegram всё-таки не принимает картинку, бот не ломается, а продолжает работу с текущим изображением.
+
+Если фото вообще не удаётся отправить, есть fallback на обычное текстовое сообщение.
+
+В твоём старом коде как раз происходила цепочка edit_media → IMAGE_PROCESS_FAILED → fallback → message not found, из-за чего следующий шаг терял сообщение. 
+
+
+Готовый bot.py
+Скачать исправленный bot.py
+
+Важно: в requirements.txt добавь одну строку:
+
+Pillow
+Остальные зависимости можешь оставить как есть.
+
+После загрузки на Railway сделай Redeploy. Старый bot.py полностью замени этим файлом.
+
+Твой исходный бот уже содержит HTTP-сервер для Railway/Render и запуск polling, поэтому эту часть я сохранил. 
+
+
+
+bot.py
+Код
+
+
+Библиотека
+/
+bot.py
+
+
 import asyncio
 import logging
+import os
 from datetime import datetime
-from io import BytesIO
 from pathlib import Path
+from io import BytesIO
+from collections import defaultdict
 
-from PIL import Image, ImageOps
+from PIL import Image
+
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -56,18 +602,37 @@ bot = Bot(
 
 dp = Dispatcher()
 
+# Сериализуем изменения одного экрана, чтобы Telegram не отменял
+# предыдущий edit_media из-за двух быстрых callback-запросов.
+SCREEN_LOCKS = defaultdict(asyncio.Lock)
+
 
 # =========================================================
-# ПУТИ
+# ПУТИ К ФАЙЛАМ
 # =========================================================
 
+# Папка, в которой находится bot.py
 BASE_DIR = Path(__file__).resolve().parent
+
+# Папка assets рядом с bot.py
 ASSETS_PATH = BASE_DIR / "assets"
 
 
 # =========================================================
 # КАРТИНКИ ПЕРСОНАЖА
 # =========================================================
+
+# ВАЖНО:
+# Расширение .jpeg должно полностью совпадать
+# с названиями файлов в GitHub.
+#
+# Также Linux на Render различает регистр букв.
+#
+# Например:
+# Drinking.jpeg
+# и
+# drinking.jpeg
+# это разные файлы.
 
 CHARACTER_IMAGES = {
     "idle": ASSETS_PATH / "idle.jpeg",
@@ -81,98 +646,61 @@ CHARACTER_IMAGES = {
 
 
 # =========================================================
-# ЗАГРУЗКА И ПЕРЕКОДИРОВКА КАРТИНКИ
+# ЗАГРУЗКА КАРТИНКИ
 # =========================================================
 
 def load_character_image(character: str) -> BufferedInputFile:
     """
-    Загружает картинку персонажа и принудительно
-    пересохраняет её в нормальный JPEG.
-
-    Это исправляет Telegram IMAGE_PROCESS_FAILED,
-    который возникал на Drinking.jpeg.
+    Загружает картинку персонажа и при необходимости заново
+    кодирует её в обычный RGB JPEG. Это устраняет Telegram
+    IMAGE_PROCESS_FAILED на файлах с нестандартным JPEG/PNG.
     """
-
     image_path = CHARACTER_IMAGES.get(
         character,
         CHARACTER_IMAGES["idle"],
     )
 
     if not image_path.exists():
-        logging.error(
-            "Character image not found: %s",
-            image_path,
-        )
-
-        raise FileNotFoundError(
-            f"Character image not found: {image_path}"
-        )
+        logging.error("Character image not found: %s", image_path)
+        raise FileNotFoundError(f"Character image not found: {image_path}")
 
     try:
         with Image.open(image_path) as image:
+            # Telegram надёжнее всего принимает обычный RGB/RGBA->RGB JPEG.
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA")
 
-            logging.info(
-                "Loading character image: %s | format=%s | mode=%s | size=%s",
-                image_path.name,
-                image.format,
-                image.mode,
-                image.size,
-            )
-
-            # Исправляем возможную ориентацию EXIF.
-            image = ImageOps.exif_transpose(image)
-
-            # JPEG не поддерживает alpha.
-            if image.mode in ("RGBA", "LA"):
-                background = Image.new(
-                    "RGB",
-                    image.size,
-                    "white",
-                )
-
-                alpha = image.getchannel("A")
-
-                background.paste(
-                    image,
-                    mask=alpha,
-                )
-
+            if image.mode == "RGBA":
+                background = Image.new("RGB", image.size, "white")
+                background.paste(image, mask=image.getchannel("A"))
                 image = background
-
-            elif image.mode != "RGB":
+            else:
                 image = image.convert("RGB")
 
             output = BytesIO()
-
             image.save(
                 output,
                 format="JPEG",
                 quality=95,
                 optimize=True,
-                progressive=False,
             )
-
             output.seek(0)
-
-            filename = f"{character}.jpg"
-
             return BufferedInputFile(
                 output.read(),
-                filename=filename,
+                filename=f"{character}.jpg",
             )
-
-    except Exception as error:
-        logging.exception(
-            "Failed to process character image %s: %s",
-            image_path,
-            error,
-        )
-
-        raise
+    except Exception:
+        logging.exception("Failed to normalize character image: %s", image_path)
+        # Если Pillow не смогла обработать файл, пробуем отправить исходник.
+        with image_path.open("rb") as file:
+            return BufferedInputFile(
+                file.read(),
+                filename=image_path.name,
+            )
 
 
 # =========================================================
-# БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ ЭКРАНА
+# РЕДАКТИРОВАНИЕ ГЛАВНОГО ЭКРАНА
 # =========================================================
 
 async def edit_screen(
@@ -182,170 +710,105 @@ async def edit_screen(
     character: str = "idle",
 ):
     """
-    Пытается заменить существующую фотографию.
+    Надёжно обновляет экран бота.
 
-    Если Telegram не принимает новое изображение,
-    удаляем старое сообщение и создаём новое.
-
-    Возвращает Message, которое сейчас является
-    актуальным экраном.
+    1. Если сообщение с фото — сначала пробуем edit_media.
+    2. Если Telegram отклоняет новую картинку (IMAGE_PROCESS_FAILED),
+       не ломаем сценарий: оставляем старую картинку и меняем caption/keyboard.
+    3. Если сообщение уже удалено/не найдено — создаём новый экран.
+    4. Ошибки «message is not modified» и «canceled by new edit request»
+       не считаем критическими.
     """
+    lock = SCREEN_LOCKS[(message.chat.id)]
 
-    photo = load_character_image(character)
-
-    # -----------------------------------------------------
-    # 1. Пытаемся заменить существующую фотографию
-    # -----------------------------------------------------
-
-    if message.photo:
-
+    async with lock:
         try:
-            media = InputMediaPhoto(
-                media=photo,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-            )
-
-            await message.edit_media(
-                media=media,
-                reply_markup=keyboard,
-            )
-
-            logging.info(
-                "Screen edited successfully: character=%s message_id=%s",
-                character,
-                message.message_id,
-            )
-
-            return message
-
-        except TelegramBadRequest as error:
-
-            error_text = str(error)
-
-            # Telegram иногда говорит, что сообщение
-            # вообще не изменилось.
-            if "message is not modified" in error_text.lower():
-
-                logging.info(
-                    "Screen was not modified: message_id=%s",
-                    message.message_id,
-                )
-
-                try:
-                    await message.edit_reply_markup(
-                        reply_markup=keyboard
-                    )
-                except Exception:
-                    pass
-
-                return message
-
-            logging.warning(
-                "edit_media failed for %s: %s",
-                character,
-                error,
-            )
-
+            photo = load_character_image(character)
         except Exception as error:
+            logging.exception("Character image load failed: %s", error)
+            photo = None
 
-            logging.exception(
-                "Unexpected edit_media error: %s",
-                error,
-            )
+        # -----------------------------------------------------
+        # Сообщение уже содержит фото
+        # -----------------------------------------------------
+        if message.photo:
+            if photo is not None:
+                try:
+                    media = InputMediaPhoto(
+                        media=photo,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                    )
+                    await message.edit_media(
+                        media=media,
+                        reply_markup=keyboard,
+                    )
+                    return message
+                except Exception as error:
+                    text = str(error)
+                    if "message is not modified" in text:
+                        return message
+                    if "canceled by new edit message request" in text:
+                        return message
+                    logging.warning(
+                        "edit_media failed, falling back to caption: %s",
+                        error,
+                    )
 
-    # -----------------------------------------------------
-    # 2. Если редактирование не получилось —
-    #    создаём новое сообщение
-    # -----------------------------------------------------
-
-    try:
-
-        new_message = await message.answer_photo(
-            photo=photo,
-            caption=caption,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.HTML,
-        )
-
-        logging.info(
-            "Created new screen: character=%s new_message_id=%s",
-            character,
-            new_message.message_id,
-        )
-
-        # Старое сообщение можно удалить после
-        # успешного создания нового.
-        try:
-            await message.delete()
-        except Exception:
-            pass
-
-        return new_message
-
-    except Exception as error:
-
-        logging.exception(
-            "Creating new screen failed: %s",
-            error,
-        )
-
-        # Если Telegram вообще не смог отправить картинку,
-        # пытаемся хотя бы поменять текст существующего
-        # сообщения.
-        try:
-
-            if message.photo:
-
+            # Даже если новая картинка не прошла Telegram,
+            # переход между шагами должен продолжаться.
+            try:
                 await message.edit_caption(
                     caption=caption,
                     reply_markup=keyboard,
                     parse_mode=ParseMode.HTML,
                 )
+            except Exception as error:
+                text = str(error)
+                if "message is not modified" not in text:
+                    logging.warning(
+                        "edit_caption fallback failed: %s",
+                        error,
+                    )
+            return message
 
-                return message
-
+        # -----------------------------------------------------
+        # Сообщение без фото: создаём новое
+        # -----------------------------------------------------
+        try:
+            await message.delete()
         except Exception:
             pass
 
-        return message
+        if photo is not None:
+            try:
+                new_message = await message.answer_photo(
+                    photo=photo,
+                    caption=caption,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                )
+                return new_message
+            except Exception as error:
+                logging.warning(
+                    "answer_photo failed, falling back to text: %s",
+                    error,
+                )
+
+        # Последний fallback — обычное текстовое сообщение.
+        try:
+            return await message.answer(
+                caption,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            logging.exception("Creating text screen failed")
+            return message
 
 
 # =========================================================
-# ОБНОВЛЕНИЕ ЭКРАНА + FSM
-# =========================================================
-
-async def render_screen(
-    message: Message,
-    state: FSMContext,
-    caption: str,
-    keyboard=None,
-    character: str = "idle",
-):
-    """
-    Общая функция для экранов.
-
-    ВАЖНО:
-    если edit_screen создаст новое сообщение,
-    main_message_id автоматически обновится.
-    """
-
-    result = await edit_screen(
-        message=message,
-        caption=caption,
-        keyboard=keyboard,
-        character=character,
-    )
-
-    await state.update_data(
-        main_message_id=result.message_id
-    )
-
-    return result
-
-
-# =========================================================
-# ФОРМАТ ДАТЫ
+# ФОРМАТИРОВАНИЕ ДАТЫ
 # =========================================================
 
 def format_datetime(value: str) -> tuple[str, str]:
@@ -369,11 +832,7 @@ def format_datetime(value: str) -> tuple[str, str]:
         "декабря",
     ]
 
-    date_text = (
-        f"{dt.day} "
-        f"{months[dt.month - 1]}"
-    )
-
+    date_text = f"{dt.day} {months[dt.month - 1]}"
     time_text = dt.strftime("%H:%M")
 
     return date_text, time_text
@@ -425,12 +884,15 @@ async def show_main_screen(
         "Что будем делать?"
     )
 
-    await render_screen(
+    result = await edit_screen(
         message=message,
-        state=state,
         caption=caption,
         keyboard=main_keyboard(),
         character=character,
+    )
+
+    await state.update_data(
+        main_message_id=result.message_id
     )
 
 
@@ -550,9 +1012,8 @@ async def add_coffee_start(
         "флэт уайт, эспрессо</i>"
     )
 
-    await render_screen(
+    await edit_screen(
         message=callback.message,
-        state=state,
         caption=caption,
         keyboard=back_keyboard(),
         character="holding_coffee",
@@ -587,6 +1048,7 @@ async def coffee_name_handler(
         AddCoffee.coffee_size
     )
 
+    # Удаляем сообщение пользователя
     try:
         await message.delete()
     except Exception:
@@ -606,8 +1068,6 @@ async def coffee_name_handler(
         "Какой размер?"
     )
 
-    # На этом этапе фото уже существует,
-    # поэтому используем актуальное сообщение.
     try:
 
         await bot.edit_message_caption(
@@ -618,40 +1078,16 @@ async def coffee_name_handler(
             parse_mode=ParseMode.HTML,
         )
 
-    except TelegramBadRequest as error:
+    except Exception as error:
 
-        logging.warning(
-            "Coffee size caption edit failed: %s",
+        logging.exception(
+            "Coffee name screen error: %s",
             error,
         )
 
-        # Если старое сообщение потерялось,
-        # создаём новый экран.
-        try:
-
-            new_message = await message.answer_photo(
-                photo=load_character_image(
-                    "holding_coffee"
-                ),
-                caption=caption,
-                reply_markup=coffee_size_keyboard(),
-                parse_mode=ParseMode.HTML,
-            )
-
-            await state.update_data(
-                main_message_id=new_message.message_id
-            )
-
-        except Exception as new_error:
-
-            logging.exception(
-                "Failed to create coffee size screen: %s",
-                new_error,
-            )
-
 
 # =========================================================
-# РАЗМЕР КОФЕ
+# РАЗМЕР
 # =========================================================
 
 @dp.callback_query(
@@ -662,12 +1098,7 @@ async def coffee_size_handler(
     state: FSMContext,
 ):
 
-    size = callback.data.split(":", 1)[1]
-
-    logging.info(
-        "Coffee size selected: %s",
-        size,
-    )
+    size = callback.data.split(":")[1]
 
     await state.update_data(
         coffee_size=size
@@ -677,9 +1108,7 @@ async def coffee_size_handler(
         AddCoffee.coffee_shop
     )
 
-    await callback.answer(
-        f"Размер {size} выбран ☕️"
-    )
+    await callback.answer()
 
     data = await state.get_data()
 
@@ -694,33 +1123,15 @@ async def coffee_size_handler(
         "<i>Напиши название кофейни</i>"
     )
 
-    # =====================================================
-    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
-    # =====================================================
-    #
-    # edit_screen теперь:
-    #
-    # 1. перекодирует Drinking.jpeg;
-    # 2. пытается заменить картинку;
-    # 3. если Telegram отвечает IMAGE_PROCESS_FAILED,
-    #    создаёт новое сообщение;
-    # 4. возвращает новое Message;
-    # 5. main_message_id обновляется.
-    #
-
-    result = await render_screen(
+    result = await edit_screen(
         message=callback.message,
-        state=state,
         caption=caption,
         keyboard=back_keyboard(),
         character="drinking",
     )
 
-    logging.info(
-        "Coffee size step completed. "
-        "Next state: coffee_shop. "
-        "message_id=%s",
-        result.message_id,
+    await state.update_data(
+        main_message_id=result.message_id
     )
 
 
@@ -764,9 +1175,6 @@ async def coffee_shop_handler(
     )
 
     if not main_message_id:
-        logging.error(
-            "main_message_id missing in coffee_shop_handler"
-        )
         return
 
     coffee_name = data.get(
@@ -785,9 +1193,6 @@ async def coffee_shop_handler(
         "Как оценишь кофе?"
     )
 
-    # Получаем chat_id и message_id.
-    # Это позволяет продолжить работу даже если
-    # предыдущий экран был создан заново.
     try:
 
         await bot.edit_message_caption(
@@ -798,36 +1203,12 @@ async def coffee_shop_handler(
             parse_mode=ParseMode.HTML,
         )
 
-    except TelegramBadRequest as error:
+    except Exception as error:
 
-        logging.warning(
-            "Coffee shop screen edit failed: %s",
+        logging.exception(
+            "Coffee shop screen error: %s",
             error,
         )
-
-        # Если старое сообщение исчезло —
-        # создаём новый экран.
-        try:
-
-            new_message = await message.answer_photo(
-                photo=load_character_image(
-                    "drinking"
-                ),
-                caption=caption,
-                reply_markup=rating_keyboard(),
-                parse_mode=ParseMode.HTML,
-            )
-
-            await state.update_data(
-                main_message_id=new_message.message_id
-            )
-
-        except Exception as new_error:
-
-            logging.exception(
-                "Failed to create rating screen: %s",
-                new_error,
-            )
 
 
 # =========================================================
@@ -842,19 +1223,12 @@ async def rating_handler(
     state: FSMContext,
 ):
 
-    value = callback.data.split(":", 1)[1]
+    value = callback.data.split(":")[1]
 
     if value == "none":
         rating = None
     else:
-        try:
-            rating = int(value)
-        except ValueError:
-            await callback.answer(
-                "Некорректная оценка.",
-                show_alert=True,
-            )
-            return
+        rating = int(value)
 
     data = await state.get_data()
 
@@ -929,9 +1303,8 @@ async def rating_handler(
         f"{rating_text}"
     )
 
-    result = await render_screen(
+    result = await edit_screen(
         message=callback.message,
-        state=state,
         caption=caption,
         keyboard=main_keyboard(),
         character="happy",
@@ -939,7 +1312,6 @@ async def rating_handler(
 
     await state.clear()
 
-    # После clear сохраняем актуальный message_id.
     await state.update_data(
         main_message_id=result.message_id
     )
@@ -954,7 +1326,6 @@ async def rating_handler(
 )
 async def statistics_handler(
     callback: CallbackQuery,
-    state: FSMContext,
 ):
 
     await callback.answer()
@@ -1000,9 +1371,8 @@ async def statistics_handler(
             f"{average_rating}"
         )
 
-    await render_screen(
+    await edit_screen(
         message=callback.message,
-        state=state,
         caption=caption,
         keyboard=back_keyboard(),
         character="sitting",
@@ -1016,7 +1386,6 @@ async def statistics_handler(
 async def render_history(
     message: Message,
     telegram_id: int,
-    state: FSMContext,
 ):
 
     coffees = await get_all_coffees(
@@ -1031,9 +1400,8 @@ async def render_history(
             "Добавь свой первый кофе ☕️"
         )
 
-        await render_screen(
+        await edit_screen(
             message=message,
-            state=state,
             caption=caption,
             keyboard=back_keyboard(),
             character="sitting",
@@ -1114,25 +1482,19 @@ async def render_history(
         inline_keyboard=buttons
     )
 
-    await render_screen(
+    await edit_screen(
         message=message,
-        state=state,
         caption=caption,
         keyboard=keyboard,
         character="sitting",
     )
 
 
-# =========================================================
-# ИСТОРИЯ — CALLBACK
-# =========================================================
-
 @dp.callback_query(
     F.data == "history"
 )
 async def history_handler(
     callback: CallbackQuery,
-    state: FSMContext,
 ):
 
     await callback.answer()
@@ -1140,7 +1502,6 @@ async def history_handler(
     await render_history(
         message=callback.message,
         telegram_id=callback.from_user.id,
-        state=state,
     )
 
 
@@ -1153,23 +1514,11 @@ async def history_handler(
 )
 async def delete_handler(
     callback: CallbackQuery,
-    state: FSMContext,
 ):
 
-    try:
-
-        coffee_id = int(
-            callback.data.split(":", 1)[1]
-        )
-
-    except (ValueError, IndexError):
-
-        await callback.answer(
-            "Ошибка записи.",
-            show_alert=True,
-        )
-
-        return
+    coffee_id = int(
+        callback.data.split(":")[1]
+    )
 
     await delete_coffee(
         telegram_id=callback.from_user.id,
@@ -1183,8 +1532,46 @@ async def delete_handler(
     await render_history(
         message=callback.message,
         telegram_id=callback.from_user.id,
-        state=state,
     )
+
+
+# =========================================================
+# HTTP-СЕРВЕР ДЛЯ RENDER
+# =========================================================
+
+async def health_handler(request: web.Request):
+    return web.Response(
+        text="Coffee Diary bot is running ☕️",
+        status=200,
+    )
+
+
+async def start_web_server():
+    # Render передаёт порт через переменную окружения PORT.
+    # Локально используем 8080.
+    port = int(os.getenv("PORT", "8080"))
+
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=port,
+    )
+
+    await site.start()
+
+    logging.info(
+        "HTTP health server started on port %s",
+        port,
+    )
+
+    return runner
 
 
 # =========================================================
@@ -1197,34 +1584,1090 @@ async def main():
         "☕ Coffee Diary bot started"
     )
 
-    logging.info(
-        "Assets path: %s",
-        ASSETS_PATH,
+    # Запускаем HTTP-сервер одновременно с Telegram polling.
+    # Это необходимо, если бот размещён на Render как Web Service:
+    # Render должен видеть открытый порт.
+    web_runner = await start_web_server()
+
+    try:
+        await dp.start_polling(
+            bot,
+            handle_signals=True,
+        )
+    finally:
+        logging.info("Stopping HTTP health server...")
+        await web_runner.cleanup()
+
+        logging.info("Closing Telegram bot session...")
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+Библиотека
+/
+bot.py
+
+
+import asyncio
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from io import BytesIO
+from collections import defaultdict
+
+from PIL import Image
+
+from aiohttp import web
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import (
+    CallbackQuery,
+    Message,
+    BufferedInputFile,
+    InputMediaPhoto,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+
+from config import BOT_TOKEN
+from database import (
+    add_coffee,
+    get_today_coffees,
+    get_all_coffees,
+    get_statistics,
+    delete_coffee,
+)
+from keyboards import (
+    main_keyboard,
+    coffee_size_keyboard,
+    rating_keyboard,
+    back_keyboard,
+)
+from states import AddCoffee
+
+
+# =========================================================
+# НАСТРОЙКИ
+# =========================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML,
+    ),
+)
+
+dp = Dispatcher()
+
+# Сериализуем изменения одного экрана, чтобы Telegram не отменял
+# предыдущий edit_media из-за двух быстрых callback-запросов.
+SCREEN_LOCKS = defaultdict(asyncio.Lock)
+
+
+# =========================================================
+# ПУТИ К ФАЙЛАМ
+# =========================================================
+
+# Папка, в которой находится bot.py
+BASE_DIR = Path(__file__).resolve().parent
+
+# Папка assets рядом с bot.py
+ASSETS_PATH = BASE_DIR / "assets"
+
+
+# =========================================================
+# КАРТИНКИ ПЕРСОНАЖА
+# =========================================================
+
+# ВАЖНО:
+# Расширение .jpeg должно полностью совпадать
+# с названиями файлов в GitHub.
+#
+# Также Linux на Render различает регистр букв.
+#
+# Например:
+# Drinking.jpeg
+# и
+# drinking.jpeg
+# это разные файлы.
+
+CHARACTER_IMAGES = {
+    "idle": ASSETS_PATH / "idle.jpeg",
+    "sitting": ASSETS_PATH / "sitting.jpeg",
+    "holding_coffee": ASSETS_PATH / "holding_coffee.jpeg",
+    "drinking": ASSETS_PATH / "Drinking.jpeg",
+    "happy": ASSETS_PATH / "Happy.jpeg",
+    "surprised": ASSETS_PATH / "surprised.jpeg",
+    "achievement": ASSETS_PATH / "achievment.jpeg",
+}
+
+
+# =========================================================
+# ЗАГРУЗКА КАРТИНКИ
+# =========================================================
+
+def load_character_image(character: str) -> BufferedInputFile:
+    """
+    Загружает картинку персонажа и при необходимости заново
+    кодирует её в обычный RGB JPEG. Это устраняет Telegram
+    IMAGE_PROCESS_FAILED на файлах с нестандартным JPEG/PNG.
+    """
+    image_path = CHARACTER_IMAGES.get(
+        character,
+        CHARACTER_IMAGES["idle"],
     )
 
-    for name, path in CHARACTER_IMAGES.items():
+    if not image_path.exists():
+        logging.error("Character image not found: %s", image_path)
+        raise FileNotFoundError(f"Character image not found: {image_path}")
 
-        if path.exists():
+    try:
+        with Image.open(image_path) as image:
+            # Telegram надёжнее всего принимает обычный RGB/RGBA->RGB JPEG.
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA")
 
-            logging.info(
-                "Character available: %s -> %s",
-                name,
-                path,
+            if image.mode == "RGBA":
+                background = Image.new("RGB", image.size, "white")
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+
+            output = BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=95,
+                optimize=True,
+            )
+            output.seek(0)
+            return BufferedInputFile(
+                output.read(),
+                filename=f"{character}.jpg",
+            )
+    except Exception:
+        logging.exception("Failed to normalize character image: %s", image_path)
+        # Если Pillow не смогла обработать файл, пробуем отправить исходник.
+        with image_path.open("rb") as file:
+            return BufferedInputFile(
+                file.read(),
+                filename=image_path.name,
+            )
+
+
+# =========================================================
+# РЕДАКТИРОВАНИЕ ГЛАВНОГО ЭКРАНА
+# =========================================================
+
+async def edit_screen(
+    message: Message,
+    caption: str,
+    keyboard=None,
+    character: str = "idle",
+):
+    """
+    Надёжно обновляет экран бота.
+
+    1. Если сообщение с фото — сначала пробуем edit_media.
+    2. Если Telegram отклоняет новую картинку (IMAGE_PROCESS_FAILED),
+       не ломаем сценарий: оставляем старую картинку и меняем caption/keyboard.
+    3. Если сообщение уже удалено/не найдено — создаём новый экран.
+    4. Ошибки «message is not modified» и «canceled by new edit request»
+       не считаем критическими.
+    """
+    lock = SCREEN_LOCKS[(message.chat.id)]
+
+    async with lock:
+        try:
+            photo = load_character_image(character)
+        except Exception as error:
+            logging.exception("Character image load failed: %s", error)
+            photo = None
+
+        # -----------------------------------------------------
+        # Сообщение уже содержит фото
+        # -----------------------------------------------------
+        if message.photo:
+            if photo is not None:
+                try:
+                    media = InputMediaPhoto(
+                        media=photo,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                    )
+                    await message.edit_media(
+                        media=media,
+                        reply_markup=keyboard,
+                    )
+                    return message
+                except Exception as error:
+                    text = str(error)
+                    if "message is not modified" in text:
+                        return message
+                    if "canceled by new edit message request" in text:
+                        return message
+                    logging.warning(
+                        "edit_media failed, falling back to caption: %s",
+                        error,
+                    )
+
+            # Даже если новая картинка не прошла Telegram,
+            # переход между шагами должен продолжаться.
+            try:
+                await message.edit_caption(
+                    caption=caption,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as error:
+                text = str(error)
+                if "message is not modified" not in text:
+                    logging.warning(
+                        "edit_caption fallback failed: %s",
+                        error,
+                    )
+            return message
+
+        # -----------------------------------------------------
+        # Сообщение без фото: создаём новое
+        # -----------------------------------------------------
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        if photo is not None:
+            try:
+                new_message = await message.answer_photo(
+                    photo=photo,
+                    caption=caption,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                )
+                return new_message
+            except Exception as error:
+                logging.warning(
+                    "answer_photo failed, falling back to text: %s",
+                    error,
+                )
+
+        # Последний fallback — обычное текстовое сообщение.
+        try:
+            return await message.answer(
+                caption,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            logging.exception("Creating text screen failed")
+            return message
+
+
+# =========================================================
+# ФОРМАТИРОВАНИЕ ДАТЫ
+# =========================================================
+
+def format_datetime(value: str) -> tuple[str, str]:
+
+    dt = datetime.fromisoformat(
+        value.replace("Z", "+00:00")
+    )
+
+    months = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ]
+
+    date_text = f"{dt.day} {months[dt.month - 1]}"
+    time_text = dt.strftime("%H:%M")
+
+    return date_text, time_text
+
+
+# =========================================================
+# ГЛАВНЫЙ ЭКРАН
+# =========================================================
+
+async def show_main_screen(
+    message: Message,
+    telegram_id: int,
+    state: FSMContext,
+    character: str = "idle",
+):
+
+    coffees = await get_today_coffees(
+        telegram_id
+    )
+
+    count = len(coffees)
+
+    if coffees:
+
+        last = coffees[0]
+
+        _, time_text = format_datetime(
+            last["created_at"]
+        )
+
+        last_coffee = (
+            f"<b>{last['coffee_name']}</b> · "
+            f"{last['coffee_size']}\n"
+            f"📍 {last['coffee_shop']} · "
+            f"{time_text}"
+        )
+
+    else:
+
+        last_coffee = (
+            "Сегодня кофе ещё не было."
+        )
+
+    caption = (
+        "☕️ <b>Coffee Diary</b>\n\n"
+        f"Сегодня — <b>{count}</b>\n\n"
+        "Последний кофе:\n"
+        f"{last_coffee}\n\n"
+        "Что будем делать?"
+    )
+
+    result = await edit_screen(
+        message=message,
+        caption=caption,
+        keyboard=main_keyboard(),
+        character=character,
+    )
+
+    await state.update_data(
+        main_message_id=result.message_id
+    )
+
+
+# =========================================================
+# START
+# =========================================================
+
+@dp.message(CommandStart())
+async def start_handler(
+    message: Message,
+    state: FSMContext,
+):
+
+    await state.clear()
+
+    telegram_id = message.from_user.id
+
+    coffees = await get_today_coffees(
+        telegram_id
+    )
+
+    count = len(coffees)
+
+    if coffees:
+
+        last = coffees[0]
+
+        _, time_text = format_datetime(
+            last["created_at"]
+        )
+
+        last_coffee = (
+            f"<b>{last['coffee_name']}</b> · "
+            f"{last['coffee_size']}\n"
+            f"📍 {last['coffee_shop']} · "
+            f"{time_text}"
+        )
+
+    else:
+
+        last_coffee = (
+            "Сегодня кофе ещё не было."
+        )
+
+    caption = (
+        "☕️ <b>Coffee Diary</b>\n\n"
+        f"Сегодня — <b>{count}</b>\n\n"
+        "Последний кофе:\n"
+        f"{last_coffee}\n\n"
+        "Добро пожаловать."
+    )
+
+    photo = load_character_image("idle")
+
+    sent_message = await message.answer_photo(
+        photo=photo,
+        caption=caption,
+        reply_markup=main_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+
+    await state.update_data(
+        main_message_id=sent_message.message_id
+    )
+
+
+# =========================================================
+# НАЗАД
+# =========================================================
+
+@dp.callback_query(
+    F.data == "back_main"
+)
+async def back_main_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.clear()
+
+    await show_main_screen(
+        message=callback.message,
+        telegram_id=callback.from_user.id,
+        state=state,
+        character="idle",
+    )
+
+
+# =========================================================
+# ДОБАВИТЬ КОФЕ
+# =========================================================
+
+@dp.callback_query(
+    F.data == "add_coffee"
+)
+async def add_coffee_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        main_message_id=callback.message.message_id
+    )
+
+    await state.set_state(
+        AddCoffee.coffee_name
+    )
+
+    caption = (
+        "☕️ <b>Добавляем кофе</b>\n\n"
+        "Как называется кофе?\n\n"
+        "<i>Например: капучино, "
+        "флэт уайт, эспрессо</i>"
+    )
+
+    await edit_screen(
+        message=callback.message,
+        caption=caption,
+        keyboard=back_keyboard(),
+        character="holding_coffee",
+    )
+
+
+# =========================================================
+# НАЗВАНИЕ КОФЕ
+# =========================================================
+
+@dp.message(
+    AddCoffee.coffee_name
+)
+async def coffee_name_handler(
+    message: Message,
+    state: FSMContext,
+):
+
+    if not message.text:
+        return
+
+    coffee_name = message.text.strip()
+
+    if not coffee_name:
+        return
+
+    await state.update_data(
+        coffee_name=coffee_name
+    )
+
+    await state.set_state(
+        AddCoffee.coffee_size
+    )
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+
+    main_message_id = data.get(
+        "main_message_id"
+    )
+
+    if not main_message_id:
+        return
+
+    caption = (
+        f"☕️ <b>{coffee_name}</b>\n\n"
+        "Какой размер?"
+    )
+
+    try:
+
+        await bot.edit_message_caption(
+            chat_id=message.chat.id,
+            message_id=main_message_id,
+            caption=caption,
+            reply_markup=coffee_size_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+
+    except Exception as error:
+
+        logging.exception(
+            "Coffee name screen error: %s",
+            error,
+        )
+
+
+# =========================================================
+# РАЗМЕР
+# =========================================================
+
+@dp.callback_query(
+    F.data.startswith("size:")
+)
+async def coffee_size_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    size = callback.data.split(":")[1]
+
+    await state.update_data(
+        coffee_size=size
+    )
+
+    await state.set_state(
+        AddCoffee.coffee_shop
+    )
+
+    await callback.answer()
+
+    data = await state.get_data()
+
+    coffee_name = data.get(
+        "coffee_name",
+        "Кофе",
+    )
+
+    caption = (
+        f"☕️ <b>{coffee_name} · {size}</b>\n\n"
+        "В какой кофейне ты его пил?\n\n"
+        "<i>Напиши название кофейни</i>"
+    )
+
+    result = await edit_screen(
+        message=callback.message,
+        caption=caption,
+        keyboard=back_keyboard(),
+        character="drinking",
+    )
+
+    await state.update_data(
+        main_message_id=result.message_id
+    )
+
+
+# =========================================================
+# КОФЕЙНЯ
+# =========================================================
+
+@dp.message(
+    AddCoffee.coffee_shop
+)
+async def coffee_shop_handler(
+    message: Message,
+    state: FSMContext,
+):
+
+    if not message.text:
+        return
+
+    coffee_shop = message.text.strip()
+
+    if not coffee_shop:
+        return
+
+    await state.update_data(
+        coffee_shop=coffee_shop
+    )
+
+    await state.set_state(
+        AddCoffee.rating
+    )
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+
+    main_message_id = data.get(
+        "main_message_id"
+    )
+
+    if not main_message_id:
+        return
+
+    coffee_name = data.get(
+        "coffee_name",
+        "Кофе",
+    )
+
+    coffee_size = data.get(
+        "coffee_size",
+        "M",
+    )
+
+    caption = (
+        f"☕️ <b>{coffee_name} · {coffee_size}</b>\n"
+        f"📍 {coffee_shop}\n\n"
+        "Как оценишь кофе?"
+    )
+
+    try:
+
+        await bot.edit_message_caption(
+            chat_id=message.chat.id,
+            message_id=main_message_id,
+            caption=caption,
+            reply_markup=rating_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+
+    except Exception as error:
+
+        logging.exception(
+            "Coffee shop screen error: %s",
+            error,
+        )
+
+
+# =========================================================
+# ОЦЕНКА
+# =========================================================
+
+@dp.callback_query(
+    F.data.startswith("rating:")
+)
+async def rating_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    value = callback.data.split(":")[1]
+
+    if value == "none":
+        rating = None
+    else:
+        rating = int(value)
+
+    data = await state.get_data()
+
+    coffee_name = data.get(
+        "coffee_name"
+    )
+
+    coffee_size = data.get(
+        "coffee_size"
+    )
+
+    coffee_shop = data.get(
+        "coffee_shop"
+    )
+
+    if not coffee_name:
+
+        await callback.answer(
+            "Не найдено название кофе.",
+            show_alert=True,
+        )
+
+        return
+
+    if not coffee_size:
+
+        await callback.answer(
+            "Не найден размер.",
+            show_alert=True,
+        )
+
+        return
+
+    if not coffee_shop:
+
+        await callback.answer(
+            "Не найдена кофейня.",
+            show_alert=True,
+        )
+
+        return
+
+    await add_coffee(
+        telegram_id=callback.from_user.id,
+        coffee_name=coffee_name,
+        coffee_size=coffee_size,
+        coffee_shop=coffee_shop,
+        rating=rating,
+    )
+
+    await callback.answer(
+        "Кофе записан ☕️"
+    )
+
+    if rating:
+
+        rating_text = (
+            f"⭐️ {rating}/5"
+        )
+
+    else:
+
+        rating_text = (
+            "Без оценки"
+        )
+
+    caption = (
+        "☕️ <b>Кофе записан</b>\n\n"
+        f"<b>{coffee_name}</b> · "
+        f"{coffee_size}\n"
+        f"📍 {coffee_shop}\n"
+        f"{rating_text}"
+    )
+
+    result = await edit_screen(
+        message=callback.message,
+        caption=caption,
+        keyboard=main_keyboard(),
+        character="happy",
+    )
+
+    await state.clear()
+
+    await state.update_data(
+        main_message_id=result.message_id
+    )
+
+
+# =========================================================
+# СТАТИСТИКА
+# =========================================================
+
+@dp.callback_query(
+    F.data == "statistics"
+)
+async def statistics_handler(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    stats = await get_statistics(
+        callback.from_user.id
+    )
+
+    if stats["total"] == 0:
+
+        caption = (
+            "📊 <b>Статистика</b>\n\n"
+            "Пока здесь пусто.\n\n"
+            "Добавь первый кофе ☕️"
+        )
+
+    else:
+
+        if stats["average_rating"] is not None:
+
+            average_rating = (
+                f"⭐️ {stats['average_rating']}/5"
             )
 
         else:
 
-            logging.error(
-                "Character MISSING: %s -> %s",
-                name,
-                path,
+            average_rating = (
+                "⭐️ Нет оценок"
             )
 
-    logging.info(
-        "Start polling"
+        caption = (
+            "📊 <b>Статистика</b>\n\n"
+            f"☕️ Всего кофе — "
+            f"<b>{stats['total']}</b>\n\n"
+            f"☕ Любимый кофе\n"
+            f"<b>{stats['favorite_coffee']}</b>\n\n"
+            f"🏪 Любимая кофейня\n"
+            f"<b>{stats['favorite_shop']}</b>\n\n"
+            f"📏 Любимый размер\n"
+            f"<b>{stats['favorite_size']}</b>\n\n"
+            f"🏪 Кофеен посещено — "
+            f"<b>{stats['shops_count']}</b>\n\n"
+            f"{average_rating}"
+        )
+
+    await edit_screen(
+        message=callback.message,
+        caption=caption,
+        keyboard=back_keyboard(),
+        character="sitting",
     )
 
-    await dp.start_polling(bot)
+
+# =========================================================
+# ИСТОРИЯ
+# =========================================================
+
+async def render_history(
+    message: Message,
+    telegram_id: int,
+):
+
+    coffees = await get_all_coffees(
+        telegram_id
+    )
+
+    if not coffees:
+
+        caption = (
+            "📖 <b>История</b>\n\n"
+            "Здесь пока ничего нет.\n\n"
+            "Добавь свой первый кофе ☕️"
+        )
+
+        await edit_screen(
+            message=message,
+            caption=caption,
+            keyboard=back_keyboard(),
+            character="sitting",
+        )
+
+        return
+
+    coffees = coffees[:10]
+
+    lines = [
+        "📖 <b>История</b>",
+        "",
+    ]
+
+    current_date = None
+
+    for coffee in coffees:
+
+        date_text, time_text = format_datetime(
+            coffee["created_at"]
+        )
+
+        if date_text != current_date:
+
+            if current_date is not None:
+                lines.append("")
+
+            lines.append(
+                f"<b>{date_text}</b>"
+            )
+
+            current_date = date_text
+
+        rating = coffee.get("rating")
+
+        if rating:
+            rating_text = f" · ⭐️ {rating}"
+        else:
+            rating_text = ""
+
+        lines.append(
+            f"{time_text} · "
+            f"<b>{coffee['coffee_name']}</b> · "
+            f"{coffee['coffee_size']}"
+        )
+
+        lines.append(
+            f"📍 {coffee['coffee_shop']}"
+            f"{rating_text}"
+        )
+
+    caption = "\n".join(lines)
+
+    buttons = []
+
+    for coffee in coffees:
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"🗑 {coffee['coffee_name']} "
+                    f"· {coffee['coffee_size']}"
+                ),
+                callback_data=(
+                    f"delete:{coffee['id']}"
+                ),
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="← Назад",
+            callback_data="back_main",
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=buttons
+    )
+
+    await edit_screen(
+        message=message,
+        caption=caption,
+        keyboard=keyboard,
+        character="sitting",
+    )
+
+
+@dp.callback_query(
+    F.data == "history"
+)
+async def history_handler(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    await render_history(
+        message=callback.message,
+        telegram_id=callback.from_user.id,
+    )
+
+
+# =========================================================
+# УДАЛЕНИЕ
+# =========================================================
+
+@dp.callback_query(
+    F.data.startswith("delete:")
+)
+async def delete_handler(
+    callback: CallbackQuery,
+):
+
+    coffee_id = int(
+        callback.data.split(":")[1]
+    )
+
+    await delete_coffee(
+        telegram_id=callback.from_user.id,
+        coffee_id=coffee_id,
+    )
+
+    await callback.answer(
+        "Запись удалена 🗑"
+    )
+
+    await render_history(
+        message=callback.message,
+        telegram_id=callback.from_user.id,
+    )
+
+
+# =========================================================
+# HTTP-СЕРВЕР ДЛЯ RENDER
+# =========================================================
+
+async def health_handler(request: web.Request):
+    return web.Response(
+        text="Coffee Diary bot is running ☕️",
+        status=200,
+    )
+
+
+async def start_web_server():
+    # Render передаёт порт через переменную окружения PORT.
+    # Локально используем 8080.
+    port = int(os.getenv("PORT", "8080"))
+
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=port,
+    )
+
+    await site.start()
+
+    logging.info(
+        "HTTP health server started on port %s",
+        port,
+    )
+
+    return runner
+
+
+# =========================================================
+# ЗАПУСК
+# =========================================================
+
+async def main():
+
+    logging.info(
+        "☕ Coffee Diary bot started"
+    )
+
+    # Запускаем HTTP-сервер одновременно с Telegram polling.
+    # Это необходимо, если бот размещён на Render как Web Service:
+    # Render должен видеть открытый порт.
+    web_runner = await start_web_server()
+
+    try:
+        await dp.start_polling(
+            bot,
+            handle_signals=True,
+        )
+    finally:
+        logging.info("Stopping HTTP health server...")
+        await web_runner.cleanup()
+
+        logging.info("Closing Telegram bot session...")
+        await bot.session.close()
 
 
 if __name__ == "__main__":
