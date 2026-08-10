@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -51,18 +52,42 @@ bot = Bot(
 
 dp = Dispatcher()
 
-ASSETS_PATH = "assets"
+
+# =========================================================
+# ПУТИ К ФАЙЛАМ
+# =========================================================
+
+# Папка, в которой находится bot.py
+BASE_DIR = Path(__file__).resolve().parent
+
+# Папка assets рядом с bot.py
+ASSETS_PATH = BASE_DIR / "assets"
+
+
+# =========================================================
+# КАРТИНКИ ПЕРСОНАЖА
+# =========================================================
 
 # ВАЖНО:
-# Файлы должны реально называться именно так.
+# Расширение .jpeg должно полностью совпадать
+# с названиями файлов в GitHub.
+#
+# Также Linux на Render различает регистр букв.
+#
+# Например:
+# Drinking.jpeg
+# и
+# drinking.jpeg
+# это разные файлы.
+
 CHARACTER_IMAGES = {
-    "idle": f"{ASSETS_PATH}/idle.jpg",
-    "sitting": f"{ASSETS_PATH}/sitting.jpg",
-    "holding_coffee": f"{ASSETS_PATH}/holding_coffee.jpg",
-    "drinking": f"{ASSETS_PATH}/Drinking.jpg",
-    "happy": f"{ASSETS_PATH}/Happy.jpg",
-    "surprised": f"{ASSETS_PATH}/surprised.jpg",
-    "achievement": f"{ASSETS_PATH}/achievment.jpg",
+    "idle": ASSETS_PATH / "idle.jpeg",
+    "sitting": ASSETS_PATH / "sitting.jpeg",
+    "holding_coffee": ASSETS_PATH / "holding_coffee.jpeg",
+    "drinking": ASSETS_PATH / "Drinking.jpeg",
+    "happy": ASSETS_PATH / "Happy.jpeg",
+    "surprised": ASSETS_PATH / "surprised.jpeg",
+    "achievement": ASSETS_PATH / "achievment.jpeg",
 }
 
 
@@ -72,10 +97,10 @@ CHARACTER_IMAGES = {
 
 def load_character_image(character: str) -> BufferedInputFile:
     """
-    Читает JPEG в память и создаёт BufferedInputFile.
+    Загружает изображение персонажа из папки assets.
 
-    Это надёжнее для Render, чем передавать открытый
-    файловый поток напрямую в Telegram API.
+    Используем абсолютный путь через Path, чтобы
+    корректно работало на Render.
     """
 
     image_path = CHARACTER_IMAGES.get(
@@ -83,12 +108,24 @@ def load_character_image(character: str) -> BufferedInputFile:
         CHARACTER_IMAGES["idle"],
     )
 
-    with open(image_path, "rb") as file:
+    # Проверяем существование файла заранее.
+    if not image_path.exists():
+        logging.error(
+            "Character image not found: %s",
+            image_path,
+        )
+
+        raise FileNotFoundError(
+            f"Character image not found: {image_path}"
+        )
+
+    # Читаем изображение в память.
+    with image_path.open("rb") as file:
         image_bytes = file.read()
 
     return BufferedInputFile(
         image_bytes,
-        filename=f"{character}.jpg",
+        filename=image_path.name,
     )
 
 
@@ -105,7 +142,11 @@ async def edit_screen(
     """
     Редактирует существующее сообщение.
 
-    Новое сообщение бота НЕ создаётся.
+    Если сообщение уже содержит фотографию —
+    заменяем фотографию, текст и клавиатуру.
+
+    Если фотографии нет —
+    удаляем старое сообщение и создаём новое.
     """
 
     try:
@@ -128,11 +169,9 @@ async def edit_screen(
 
             return message
 
-        # На случай, если старое сообщение вдруг
+        # На случай, если старое сообщение
         # оказалось не фотографией.
-        #
-        # Обычно сюда мы не попадаем, потому что главный
-        # экран всегда создаётся как photo.
+
         await message.delete()
 
         new_message = await message.answer_photo(
@@ -145,6 +184,7 @@ async def edit_screen(
         return new_message
 
     except Exception as error:
+
         logging.exception(
             "Screen edit error: %s",
             error,
