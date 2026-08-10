@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
     Message,
-    FSInputFile,
+    BufferedInputFile,
     InputMediaPhoto,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -53,15 +53,104 @@ dp = Dispatcher()
 
 ASSETS_PATH = "assets"
 
+# ВАЖНО:
+# Файлы должны реально называться именно так.
 CHARACTER_IMAGES = {
-    "idle": f"{ASSETS_PATH}/idle.png",
-    "sitting": f"{ASSETS_PATH}/sitting.png",
-    "holding_coffee": f"{ASSETS_PATH}/holding_coffee.png",
-    "drinking": f"{ASSETS_PATH}/Drinking.png",
-    "happy": f"{ASSETS_PATH}/Happy.png",
-    "surprised": f"{ASSETS_PATH}/surprised.png",
-    "achievement": f"{ASSETS_PATH}/achievment.png",
+    "idle": f"{ASSETS_PATH}/idle.jpg",
+    "sitting": f"{ASSETS_PATH}/sitting.jpg",
+    "holding_coffee": f"{ASSETS_PATH}/holding_coffee.jpg",
+    "drinking": f"{ASSETS_PATH}/Drinking.jpg",
+    "happy": f"{ASSETS_PATH}/Happy.jpg",
+    "surprised": f"{ASSETS_PATH}/surprised.jpg",
+    "achievement": f"{ASSETS_PATH}/achievment.jpg",
 }
+
+
+# =========================================================
+# ЗАГРУЗКА КАРТИНКИ
+# =========================================================
+
+def load_character_image(character: str) -> BufferedInputFile:
+    """
+    Читает JPEG в память и создаёт BufferedInputFile.
+
+    Это надёжнее для Render, чем передавать открытый
+    файловый поток напрямую в Telegram API.
+    """
+
+    image_path = CHARACTER_IMAGES.get(
+        character,
+        CHARACTER_IMAGES["idle"],
+    )
+
+    with open(image_path, "rb") as file:
+        image_bytes = file.read()
+
+    return BufferedInputFile(
+        image_bytes,
+        filename=f"{character}.jpg",
+    )
+
+
+# =========================================================
+# РЕДАКТИРОВАНИЕ ГЛАВНОГО ЭКРАНА
+# =========================================================
+
+async def edit_screen(
+    message: Message,
+    caption: str,
+    keyboard=None,
+    character: str = "idle",
+):
+    """
+    Редактирует существующее сообщение.
+
+    Новое сообщение бота НЕ создаётся.
+    """
+
+    try:
+        photo = load_character_image(character)
+
+        # Если главное сообщение уже содержит фотографию,
+        # просто заменяем фото + текст + клавиатуру.
+        if message.photo:
+
+            media = InputMediaPhoto(
+                media=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+
+            await message.edit_media(
+                media=media,
+                reply_markup=keyboard,
+            )
+
+            return message
+
+        # На случай, если старое сообщение вдруг
+        # оказалось не фотографией.
+        #
+        # Обычно сюда мы не попадаем, потому что главный
+        # экран всегда создаётся как photo.
+        await message.delete()
+
+        new_message = await message.answer_photo(
+            photo=photo,
+            caption=caption,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+        )
+
+        return new_message
+
+    except Exception as error:
+        logging.exception(
+            "Screen edit error: %s",
+            error,
+        )
+
+        return message
 
 
 # =========================================================
@@ -69,10 +158,6 @@ CHARACTER_IMAGES = {
 # =========================================================
 
 def format_datetime(value: str) -> tuple[str, str]:
-    """
-    Возвращает дату и время в формате:
-    10 августа / 14:32
-    """
 
     dt = datetime.fromisoformat(
         value.replace("Z", "+00:00")
@@ -100,88 +185,6 @@ def format_datetime(value: str) -> tuple[str, str]:
 
 
 # =========================================================
-# РЕДАКТИРОВАНИЕ ГЛАВНОГО ЭКРАНА
-# =========================================================
-
-async def edit_screen(
-    message: Message,
-    caption: str,
-    keyboard=None,
-    character: str = "idle",
-):
-    """
-    Редактирует существующее сообщение с персонажем.
-    Новые сообщения от бота здесь не создаются.
-    """
-
-    image_path = CHARACTER_IMAGES.get(
-        character,
-        CHARACTER_IMAGES["idle"],
-    )
-
-    try:
-        photo = FSInputFile(image_path)
-
-        if message.photo:
-            media = InputMediaPhoto(
-                media=photo,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-            )
-
-            await message.edit_media(
-                media=media,
-                reply_markup=keyboard,
-            )
-
-        else:
-            await message.delete()
-
-            new_message = await message.answer_photo(
-                photo=photo,
-                caption=caption,
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML,
-            )
-
-            return new_message
-
-    except Exception as error:
-        logging.error(
-            "Screen edit error: %s",
-            error,
-        )
-
-    return message
-
-
-# =========================================================
-# КЛАВИАТУРА ОДНОЙ ЗАПИСИ
-# =========================================================
-
-def coffee_detail_keyboard(
-    coffee_id: int,
-) -> InlineKeyboardMarkup:
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🗑 Удалить",
-                    callback_data=f"delete:{coffee_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← История",
-                    callback_data="history",
-                )
-            ],
-        ]
-    )
-
-
-# =========================================================
 # ГЛАВНЫЙ ЭКРАН
 # =========================================================
 
@@ -191,64 +194,6 @@ async def show_main_screen(
     state: FSMContext,
     character: str = "idle",
 ):
-    coffees = await get_today_coffees(
-        telegram_id
-    )
-
-    count = len(coffees)
-
-    if coffees:
-        last = coffees[0]
-
-        date_text, time_text = format_datetime(
-            last["created_at"]
-        )
-
-        last_coffee = (
-            f"<b>{last['coffee_name']}</b> · "
-            f"{last['coffee_size']}\n"
-            f"📍 {last['coffee_shop']} · "
-            f"{time_text}"
-        )
-
-    else:
-        last_coffee = (
-            "Сегодня кофе ещё не было."
-        )
-
-    caption = (
-        "☕️ <b>Coffee Diary</b>\n\n"
-        f"Сегодня — <b>{count}</b>\n\n"
-        f"Последний кофе:\n"
-        f"{last_coffee}\n\n"
-        "Что будем делать?"
-    )
-
-    result = await edit_screen(
-        message=message,
-        caption=caption,
-        keyboard=main_keyboard(),
-        character=character,
-    )
-
-    if result:
-        await state.update_data(
-            main_message_id=result.message_id
-        )
-
-
-# =========================================================
-# START
-# =========================================================
-
-@dp.message(CommandStart())
-async def start_handler(
-    message: Message,
-    state: FSMContext,
-):
-    await state.clear()
-
-    telegram_id = message.from_user.id
 
     coffees = await get_today_coffees(
         telegram_id
@@ -257,6 +202,7 @@ async def start_handler(
     count = len(coffees)
 
     if coffees:
+
         last = coffees[0]
 
         _, time_text = format_datetime(
@@ -271,6 +217,7 @@ async def start_handler(
         )
 
     else:
+
         last_coffee = (
             "Сегодня кофе ещё не было."
         )
@@ -278,15 +225,76 @@ async def start_handler(
     caption = (
         "☕️ <b>Coffee Diary</b>\n\n"
         f"Сегодня — <b>{count}</b>\n\n"
-        f"Последний кофе:\n"
+        "Последний кофе:\n"
+        f"{last_coffee}\n\n"
+        "Что будем делать?"
+    )
+
+    result = await edit_screen(
+        message=message,
+        caption=caption,
+        keyboard=main_keyboard(),
+        character=character,
+    )
+
+    await state.update_data(
+        main_message_id=result.message_id
+    )
+
+
+# =========================================================
+# START
+# =========================================================
+
+@dp.message(CommandStart())
+async def start_handler(
+    message: Message,
+    state: FSMContext,
+):
+
+    await state.clear()
+
+    telegram_id = message.from_user.id
+
+    coffees = await get_today_coffees(
+        telegram_id
+    )
+
+    count = len(coffees)
+
+    if coffees:
+
+        last = coffees[0]
+
+        _, time_text = format_datetime(
+            last["created_at"]
+        )
+
+        last_coffee = (
+            f"<b>{last['coffee_name']}</b> · "
+            f"{last['coffee_size']}\n"
+            f"📍 {last['coffee_shop']} · "
+            f"{time_text}"
+        )
+
+    else:
+
+        last_coffee = (
+            "Сегодня кофе ещё не было."
+        )
+
+    caption = (
+        "☕️ <b>Coffee Diary</b>\n\n"
+        f"Сегодня — <b>{count}</b>\n\n"
+        "Последний кофе:\n"
         f"{last_coffee}\n\n"
         "Добро пожаловать."
     )
 
+    photo = load_character_image("idle")
+
     sent_message = await message.answer_photo(
-        photo=FSInputFile(
-            CHARACTER_IMAGES["idle"]
-        ),
+        photo=photo,
         caption=caption,
         reply_markup=main_keyboard(),
         parse_mode=ParseMode.HTML,
@@ -298,7 +306,7 @@ async def start_handler(
 
 
 # =========================================================
-# НАЗАД НА ГЛАВНУЮ
+# НАЗАД
 # =========================================================
 
 @dp.callback_query(
@@ -308,6 +316,7 @@ async def back_main_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     await callback.answer()
 
     await state.clear()
@@ -321,7 +330,7 @@ async def back_main_handler(
 
 
 # =========================================================
-# ДОБАВЛЕНИЕ КОФЕ
+# ДОБАВИТЬ КОФЕ
 # =========================================================
 
 @dp.callback_query(
@@ -331,6 +340,7 @@ async def add_coffee_start(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     await callback.answer()
 
     await state.update_data(
@@ -367,6 +377,7 @@ async def coffee_name_handler(
     message: Message,
     state: FSMContext,
 ):
+
     if not message.text:
         return
 
@@ -383,6 +394,7 @@ async def coffee_name_handler(
         AddCoffee.coffee_size
     )
 
+    # Удаляем сообщение пользователя
     try:
         await message.delete()
     except Exception:
@@ -403,6 +415,7 @@ async def coffee_name_handler(
     )
 
     try:
+
         await bot.edit_message_caption(
             chat_id=message.chat.id,
             message_id=main_message_id,
@@ -412,8 +425,9 @@ async def coffee_name_handler(
         )
 
     except Exception as error:
-        logging.error(
-            "Coffee name error: %s",
+
+        logging.exception(
+            "Coffee name screen error: %s",
             error,
         )
 
@@ -429,6 +443,7 @@ async def coffee_size_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     size = callback.data.split(":")[1]
 
     await state.update_data(
@@ -473,6 +488,7 @@ async def coffee_shop_handler(
     message: Message,
     state: FSMContext,
 ):
+
     if not message.text:
         return
 
@@ -520,6 +536,7 @@ async def coffee_shop_handler(
     )
 
     try:
+
         await bot.edit_message_caption(
             chat_id=message.chat.id,
             message_id=main_message_id,
@@ -529,8 +546,9 @@ async def coffee_shop_handler(
         )
 
     except Exception as error:
-        logging.error(
-            "Coffee shop error: %s",
+
+        logging.exception(
+            "Coffee shop screen error: %s",
             error,
         )
 
@@ -546,6 +564,7 @@ async def rating_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     value = callback.data.split(":")[1]
 
     if value == "none":
@@ -568,24 +587,30 @@ async def rating_handler(
     )
 
     if not coffee_name:
+
         await callback.answer(
             "Не найдено название кофе.",
             show_alert=True,
         )
+
         return
 
     if not coffee_size:
+
         await callback.answer(
             "Не найден размер.",
             show_alert=True,
         )
+
         return
 
     if not coffee_shop:
+
         await callback.answer(
             "Не найдена кофейня.",
             show_alert=True,
         )
+
         return
 
     await add_coffee(
@@ -601,10 +626,13 @@ async def rating_handler(
     )
 
     if rating:
+
         rating_text = (
             f"⭐️ {rating}/5"
         )
+
     else:
+
         rating_text = (
             "Без оценки"
         )
@@ -641,6 +669,7 @@ async def rating_handler(
 async def statistics_handler(
     callback: CallbackQuery,
 ):
+
     await callback.answer()
 
     stats = await get_statistics(
@@ -658,10 +687,13 @@ async def statistics_handler(
     else:
 
         if stats["average_rating"] is not None:
+
             average_rating = (
                 f"⭐️ {stats['average_rating']}/5"
             )
+
         else:
+
             average_rating = (
                 "⭐️ Нет оценок"
             )
@@ -693,16 +725,13 @@ async def statistics_handler(
 # ИСТОРИЯ
 # =========================================================
 
-@dp.callback_query(
-    F.data == "history"
-)
-async def history_handler(
-    callback: CallbackQuery,
+async def render_history(
+    message: Message,
+    telegram_id: int,
 ):
-    await callback.answer()
 
     coffees = await get_all_coffees(
-        callback.from_user.id
+        telegram_id
     )
 
     if not coffees:
@@ -714,7 +743,7 @@ async def history_handler(
         )
 
         await edit_screen(
-            message=callback.message,
+            message=message,
             caption=caption,
             keyboard=back_keyboard(),
             character="sitting",
@@ -722,7 +751,6 @@ async def history_handler(
 
         return
 
-    # Берём последние 10 записей
     coffees = coffees[:10]
 
     lines = [
@@ -749,14 +777,10 @@ async def history_handler(
 
             current_date = date_text
 
-        rating = coffee.get(
-            "rating"
-        )
+        rating = coffee.get("rating")
 
         if rating:
-            rating_text = (
-                f" · ⭐️ {rating}"
-            )
+            rating_text = f" · ⭐️ {rating}"
         else:
             rating_text = ""
 
@@ -771,28 +795,21 @@ async def history_handler(
             f"{rating_text}"
         )
 
-        lines.append(
-            f"   ID: {coffee['id']}"
-        )
-
-    lines.append("")
-    lines.append(
-        "<i>Нажми ID записи, чтобы удалить её.</i>"
-    )
-
     caption = "\n".join(lines)
 
-    # Создаём кнопки удаления
     buttons = []
 
     for coffee in coffees:
+
         buttons.append([
             InlineKeyboardButton(
                 text=(
                     f"🗑 {coffee['coffee_name']} "
                     f"· {coffee['coffee_size']}"
                 ),
-                callback_data=f"delete:{coffee['id']}",
+                callback_data=(
+                    f"delete:{coffee['id']}"
+                ),
             )
         ])
 
@@ -808,10 +825,25 @@ async def history_handler(
     )
 
     await edit_screen(
-        message=callback.message,
+        message=message,
         caption=caption,
         keyboard=keyboard,
         character="sitting",
+    )
+
+
+@dp.callback_query(
+    F.data == "history"
+)
+async def history_handler(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    await render_history(
+        message=callback.message,
+        telegram_id=callback.from_user.id,
     )
 
 
@@ -825,6 +857,7 @@ async def history_handler(
 async def delete_handler(
     callback: CallbackQuery,
 ):
+
     coffee_id = int(
         callback.data.split(":")[1]
     )
@@ -838,105 +871,9 @@ async def delete_handler(
         "Запись удалена 🗑"
     )
 
-    # Возвращаем историю
-    coffees = await get_all_coffees(
-        callback.from_user.id
-    )
-
-    if not coffees:
-
-        caption = (
-            "📖 <b>История</b>\n\n"
-            "История пока пуста."
-        )
-
-        await edit_screen(
-            message=callback.message,
-            caption=caption,
-            keyboard=back_keyboard(),
-            character="sitting",
-        )
-
-        return
-
-    coffees = coffees[:10]
-
-    lines = [
-        "📖 <b>История</b>",
-        "",
-    ]
-
-    current_date = None
-
-    for coffee in coffees:
-
-        date_text, time_text = format_datetime(
-            coffee["created_at"]
-        )
-
-        if date_text != current_date:
-
-            if current_date is not None:
-                lines.append("")
-
-            lines.append(
-                f"<b>{date_text}</b>"
-            )
-
-            current_date = date_text
-
-        rating = coffee.get(
-            "rating"
-        )
-
-        rating_text = (
-            f" · ⭐️ {rating}"
-            if rating
-            else ""
-        )
-
-        lines.append(
-            f"{time_text} · "
-            f"<b>{coffee['coffee_name']}</b> · "
-            f"{coffee['coffee_size']}"
-        )
-
-        lines.append(
-            f"📍 {coffee['coffee_shop']}"
-            f"{rating_text}"
-        )
-
-    caption = "\n".join(lines)
-
-    buttons = []
-
-    for coffee in coffees:
-        buttons.append([
-            InlineKeyboardButton(
-                text=(
-                    f"🗑 {coffee['coffee_name']} "
-                    f"· {coffee['coffee_size']}"
-                ),
-                callback_data=f"delete:{coffee['id']}",
-            )
-        ])
-
-    buttons.append([
-        InlineKeyboardButton(
-            text="← Назад",
-            callback_data="back_main",
-        )
-    ])
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=buttons
-    )
-
-    await edit_screen(
+    await render_history(
         message=callback.message,
-        caption=caption,
-        keyboard=keyboard,
-        character="sitting",
+        telegram_id=callback.from_user.id,
     )
 
 
