@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
-from pathlib import Path
-from io import BytesIO
 from collections import defaultdict
+from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
 
-from PIL import Image
 from aiohttp import web
+from PIL import Image
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -15,39 +15,53 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
-    CallbackQuery,
-    Message,
     BufferedInputFile,
-    InputMediaPhoto,
-    InlineKeyboardMarkup,
+    CallbackQuery,
     InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Message,
 )
 
 from config import BOT_TOKEN
 from database import (
     add_coffee,
-    get_today_coffees,
+    delete_coffee,
     get_all_coffees,
     get_statistics,
-    delete_coffee,
+    get_today_coffees,
 )
 from keyboards import (
-    main_keyboard,
-    coffee_size_keyboard,
-    rating_keyboard,
     back_keyboard,
+    coffee_size_keyboard,
+    main_keyboard,
+    rating_keyboard,
 )
 from states import AddCoffee
 
 
-# =========================================================
-# НАСТРОЙКИ
-# =========================================================
+# ============================================================
+# LOGGING
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# BOT
+# ============================================================
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN is not set. "
+        "Add BOT_TOKEN to Render Environment Variables."
+    )
+
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -58,20 +72,25 @@ bot = Bot(
 
 dp = Dispatcher()
 
+
+# ============================================================
+# LOCKS
+# ============================================================
+
 SCREEN_LOCKS = defaultdict(asyncio.Lock)
 
 
-# =========================================================
-# ПУТИ
-# =========================================================
+# ============================================================
+# PATHS
+# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 ASSETS_PATH = BASE_DIR / "assets"
 
 
-# =========================================================
-# КАРТИНКИ
-# =========================================================
+# ============================================================
+# CHARACTER IMAGES
+# ============================================================
 
 CHARACTER_IMAGES = {
     "idle": ASSETS_PATH / "idle.jpeg",
@@ -84,11 +103,17 @@ CHARACTER_IMAGES = {
 }
 
 
-# =========================================================
-# ЗАГРУЗКА КАРТИНКИ
-# =========================================================
+# ============================================================
+# IMAGE LOADER
+# ============================================================
 
-def load_character_image(character: str) -> BufferedInputFile:
+def load_character_image(character: str = "idle") -> BufferedInputFile:
+    """
+    Загружает изображение персонажа и пересохраняет его
+    в нормальный RGB JPEG.
+
+    Это помогает избежать Telegram IMAGE_PROCESS_FAILED.
+    """
 
     image_path = CHARACTER_IMAGES.get(
         character,
@@ -96,10 +121,11 @@ def load_character_image(character: str) -> BufferedInputFile:
     )
 
     if not image_path.exists():
-        logging.error(
+        logger.error(
             "Character image not found: %s",
             image_path,
         )
+
         raise FileNotFoundError(
             f"Character image not found: {image_path}"
         )
@@ -111,6 +137,7 @@ def load_character_image(character: str) -> BufferedInputFile:
                 image = image.convert("RGBA")
 
             if image.mode == "RGBA":
+
                 background = Image.new(
                     "RGB",
                     image.size,
@@ -145,21 +172,104 @@ def load_character_image(character: str) -> BufferedInputFile:
 
     except Exception:
 
-        logging.exception(
-            "Failed to normalize character image: %s",
+        logger.exception(
+            "Failed to process image: %s",
             image_path,
         )
 
         with image_path.open("rb") as file:
+
             return BufferedInputFile(
                 file.read(),
                 filename=image_path.name,
             )
 
 
-# =========================================================
-# РЕДАКТИРОВАНИЕ ЭКРАНА
-# =========================================================
+# ============================================================
+# SAFE TELEGRAM TEXT
+# ============================================================
+
+def safe_text(value) -> str:
+    """
+    Безопасное преобразование значения в строку.
+    """
+
+    if value is None:
+        return ""
+
+    return str(value)
+
+
+# ============================================================
+# DATE
+# ============================================================
+
+def parse_datetime(value: str) -> datetime:
+    """
+    Парсит дату из Supabase/ISO.
+
+    Если timezone отсутствует — считаем UTC.
+    """
+
+    if not value:
+        return datetime.now(timezone.utc)
+
+    value = str(value)
+
+    try:
+        dt = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+
+    except ValueError:
+
+        logger.warning(
+            "Could not parse datetime: %s",
+            value,
+        )
+
+        return datetime.now(timezone.utc)
+
+    if dt.tzinfo is None:
+        dt = dt.replace(
+            tzinfo=timezone.utc
+        )
+
+    return dt
+
+
+def format_datetime(value: str) -> tuple[str, str]:
+
+    dt = parse_datetime(value)
+
+    months = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ]
+
+    date_text = (
+        f"{dt.day} "
+        f"{months[dt.month - 1]}"
+    )
+
+    time_text = dt.strftime("%H:%M")
+
+    return date_text, time_text
+
+
+# ============================================================
+# EDIT SCREEN
+# ============================================================
 
 async def edit_screen(
     message: Message,
@@ -167,26 +277,48 @@ async def edit_screen(
     keyboard=None,
     character: str = "idle",
 ):
+    """
+    Универсальное обновление главного экрана.
 
-    lock = SCREEN_LOCKS[message.chat.id]
+    Если сообщение содержит фото:
+        пытаемся заменить фото + caption.
+
+    Если Telegram не принимает новую картинку:
+        меняем только caption.
+
+    Если сообщение не содержит фото:
+        удаляем его и создаём новое фото.
+
+    Если фото вообще не удалось отправить:
+        создаём обычное текстовое сообщение.
+    """
+
+    lock = SCREEN_LOCKS[
+        (
+            message.chat.id,
+            message.message_id,
+        )
+    ]
 
     async with lock:
 
+        photo = None
+
         try:
-            photo = load_character_image(character)
-
-        except Exception as error:
-
-            logging.exception(
-                "Character image load failed: %s",
-                error,
+            photo = load_character_image(
+                character
             )
 
-            photo = None
+        except Exception:
 
-        # -------------------------------------------------
-        # Если сообщение уже содержит фото
-        # -------------------------------------------------
+            logger.exception(
+                "Could not load character: %s",
+                character,
+            )
+
+        # ----------------------------------------------------
+        # EXISTING PHOTO MESSAGE
+        # ----------------------------------------------------
 
         if message.photo:
 
@@ -209,18 +341,22 @@ async def edit_screen(
 
                 except Exception as error:
 
-                    text = str(error)
+                    error_text = str(error)
 
-                    if "message is not modified" in text:
+                    if (
+                        "message is not modified"
+                        in error_text.lower()
+                    ):
                         return message
 
-                    if "canceled by new edit request" in text:
-                        return message
-
-                    logging.warning(
+                    logger.warning(
                         "edit_media failed: %s",
                         error,
                     )
+
+            # ------------------------------------------------
+            # FALLBACK: EDIT CAPTION ONLY
+            # ------------------------------------------------
 
             try:
 
@@ -230,45 +366,61 @@ async def edit_screen(
                     parse_mode=ParseMode.HTML,
                 )
 
+                return message
+
             except Exception as error:
 
-                if "message is not modified" not in str(error):
+                if (
+                    "message is not modified"
+                    not in str(error).lower()
+                ):
 
-                    logging.warning(
+                    logger.warning(
                         "edit_caption failed: %s",
                         error,
                     )
 
-            return message
+                return message
 
-        # -------------------------------------------------
-        # Если сообщения с фото нет
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # MESSAGE WITHOUT PHOTO
+        # ----------------------------------------------------
 
         try:
             await message.delete()
+
         except Exception:
             pass
+
+        # ----------------------------------------------------
+        # CREATE PHOTO
+        # ----------------------------------------------------
 
         if photo is not None:
 
             try:
 
-                new_message = await message.answer_photo(
-                    photo=photo,
-                    caption=caption,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML,
+                new_message = (
+                    await message.answer_photo(
+                        photo=photo,
+                        caption=caption,
+                        reply_markup=keyboard,
+                        parse_mode=ParseMode.HTML,
+                    )
                 )
 
                 return new_message
 
             except Exception as error:
 
-                logging.warning(
+                logger.warning(
                     "answer_photo failed: %s",
                     error,
                 )
+
+        # ----------------------------------------------------
+        # FINAL FALLBACK: TEXT
+        # ----------------------------------------------------
 
         return await message.answer(
             caption,
@@ -277,43 +429,9 @@ async def edit_screen(
         )
 
 
-# =========================================================
-# ФОРМАТ ДАТЫ
-# =========================================================
-
-def format_datetime(value: str) -> tuple[str, str]:
-
-    dt = datetime.fromisoformat(
-        value.replace("Z", "+00:00")
-    )
-
-    months = [
-        "января",
-        "февраля",
-        "марта",
-        "апреля",
-        "мая",
-        "июня",
-        "июля",
-        "августа",
-        "сентября",
-        "октября",
-        "ноября",
-        "декабря",
-    ]
-
-    date_text = (
-        f"{dt.day} {months[dt.month - 1]}"
-    )
-
-    time_text = dt.strftime("%H:%M")
-
-    return date_text, time_text
-
-
-# =========================================================
-# ГЛАВНЫЙ ЭКРАН
-# =========================================================
+# ============================================================
+# MAIN SCREEN
+# ============================================================
 
 async def show_main_screen(
     message: Message,
@@ -321,6 +439,9 @@ async def show_main_screen(
     state: FSMContext,
     character: str = "idle",
 ):
+    """
+    Показывает главный экран.
+    """
 
     coffees = await get_today_coffees(
         telegram_id
@@ -336,10 +457,22 @@ async def show_main_screen(
             last["created_at"]
         )
 
+        coffee_name = safe_text(
+            last.get("coffee_name")
+        )
+
+        coffee_size = safe_text(
+            last.get("coffee_size")
+        )
+
+        coffee_shop = safe_text(
+            last.get("coffee_shop")
+        )
+
         last_coffee = (
-            f"<b>{last['coffee_name']}</b> · "
-            f"{last['coffee_size']}\n"
-            f"📍 {last['coffee_shop']} · "
+            f"<b>{coffee_name}</b> · "
+            f"{coffee_size}\n"
+            f"📍 {coffee_shop} · "
             f"{time_text}"
         )
 
@@ -369,9 +502,9 @@ async def show_main_screen(
     )
 
 
-# =========================================================
+# ============================================================
 # START
-# =========================================================
+# ============================================================
 
 @dp.message(CommandStart())
 async def start_handler(
@@ -398,9 +531,9 @@ async def start_handler(
         )
 
         last_coffee = (
-            f"<b>{last['coffee_name']}</b> · "
-            f"{last['coffee_size']}\n"
-            f"📍 {last['coffee_shop']} · "
+            f"<b>{safe_text(last.get('coffee_name'))}</b> · "
+            f"{safe_text(last.get('coffee_size'))}\n"
+            f"📍 {safe_text(last.get('coffee_shop'))} · "
             f"{time_text}"
         )
 
@@ -418,25 +551,45 @@ async def start_handler(
         "Добро пожаловать."
     )
 
-    photo = load_character_image("idle")
+    try:
 
-    sent_message = await message.answer_photo(
-        photo=photo,
-        caption=caption,
-        reply_markup=main_keyboard(),
-        parse_mode=ParseMode.HTML,
-    )
+        photo = load_character_image(
+            "idle"
+        )
+
+        sent_message = (
+            await message.answer_photo(
+                photo=photo,
+                caption=caption,
+                reply_markup=main_keyboard(),
+                parse_mode=ParseMode.HTML,
+            )
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Could not send start photo"
+        )
+
+        sent_message = await message.answer(
+            caption,
+            reply_markup=main_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
 
     await state.update_data(
         main_message_id=sent_message.message_id
     )
 
 
-# =========================================================
-# НАЗАД
-# =========================================================
+# ============================================================
+# BACK
+# ============================================================
 
-@dp.callback_query(F.data == "back_main")
+@dp.callback_query(
+    F.data == "back_main"
+)
 async def back_main_handler(
     callback: CallbackQuery,
     state: FSMContext,
@@ -454,11 +607,13 @@ async def back_main_handler(
     )
 
 
-# =========================================================
-# ДОБАВИТЬ КОФЕ
-# =========================================================
+# ============================================================
+# ADD COFFEE
+# ============================================================
 
-@dp.callback_query(F.data == "add_coffee")
+@dp.callback_query(
+    F.data == "add_coffee"
+)
 async def add_coffee_start(
     callback: CallbackQuery,
     state: FSMContext,
@@ -477,8 +632,7 @@ async def add_coffee_start(
     caption = (
         "☕️ <b>Добавляем кофе</b>\n\n"
         "Как называется кофе?\n\n"
-        "<i>Например: капучино, "
-        "флэт уайт, эспрессо</i>"
+        "<i>Можно написать любое название</i>"
     )
 
     result = await edit_screen(
@@ -493,11 +647,13 @@ async def add_coffee_start(
     )
 
 
-# =========================================================
-# НАЗВАНИЕ КОФЕ
-# =========================================================
+# ============================================================
+# COFFEE NAME
+# ============================================================
 
-@dp.message(AddCoffee.coffee_name)
+@dp.message(
+    AddCoffee.coffee_name
+)
 async def coffee_name_handler(
     message: Message,
     state: FSMContext,
@@ -521,6 +677,7 @@ async def coffee_name_handler(
 
     try:
         await message.delete()
+
     except Exception:
         pass
 
@@ -550,23 +707,30 @@ async def coffee_name_handler(
 
     except Exception as error:
 
-        logging.exception(
+        logger.exception(
             "Coffee name screen error: %s",
             error,
         )
 
 
-# =========================================================
-# РАЗМЕР
-# =========================================================
+# ============================================================
+# SIZE
+# ============================================================
 
-@dp.callback_query(F.data.startswith("size:"))
+@dp.callback_query(
+    F.data.startswith("size:")
+)
 async def coffee_size_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
 
-    size = callback.data.split(":", 1)[1]
+    await callback.answer()
+
+    size = callback.data.split(
+        ":",
+        1,
+    )[1]
 
     await state.update_data(
         coffee_size=size
@@ -575,8 +739,6 @@ async def coffee_size_handler(
     await state.set_state(
         AddCoffee.coffee_shop
     )
-
-    await callback.answer()
 
     data = await state.get_data()
 
@@ -603,11 +765,13 @@ async def coffee_size_handler(
     )
 
 
-# =========================================================
-# КОФЕЙНЯ
-# =========================================================
+# ============================================================
+# COFFEE SHOP
+# ============================================================
 
-@dp.message(AddCoffee.coffee_shop)
+@dp.message(
+    AddCoffee.coffee_shop
+)
 async def coffee_shop_handler(
     message: Message,
     state: FSMContext,
@@ -631,6 +795,7 @@ async def coffee_shop_handler(
 
     try:
         await message.delete()
+
     except Exception:
         pass
 
@@ -671,28 +836,46 @@ async def coffee_shop_handler(
 
     except Exception as error:
 
-        logging.exception(
+        logger.exception(
             "Coffee shop screen error: %s",
             error,
         )
 
 
-# =========================================================
-# ОЦЕНКА
-# =========================================================
+# ============================================================
+# RATING
+# ============================================================
 
-@dp.callback_query(F.data.startswith("rating:"))
+@dp.callback_query(
+    F.data.startswith("rating:")
+)
 async def rating_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ):
 
-    value = callback.data.split(":", 1)[1]
+    await callback.answer()
+
+    value = callback.data.split(
+        ":",
+        1,
+    )[1]
 
     if value == "none":
         rating = None
     else:
-        rating = int(value)
+
+        try:
+            rating = int(value)
+
+        except ValueError:
+
+            await callback.answer(
+                "Некорректная оценка.",
+                show_alert=True,
+            )
+
+            return
 
     data = await state.get_data()
 
@@ -735,22 +918,40 @@ async def rating_handler(
 
         return
 
-    await add_coffee(
-        telegram_id=callback.from_user.id,
-        coffee_name=coffee_name,
-        coffee_size=coffee_size,
-        coffee_shop=coffee_shop,
-        rating=rating,
-    )
+    try:
 
-    await callback.answer(
-        "Кофе записан ☕️"
-    )
+        await add_coffee(
+            telegram_id=callback.from_user.id,
+            coffee_name=coffee_name,
+            coffee_size=coffee_size,
+            coffee_shop=coffee_shop,
+            rating=rating,
+        )
 
-    if rating:
-        rating_text = f"⭐️ {rating}/5"
+    except Exception:
+
+        logger.exception(
+            "Failed to save coffee"
+        )
+
+        await callback.answer(
+            "Не удалось сохранить кофе.",
+            show_alert=True,
+        )
+
+        return
+
+    if rating is not None:
+
+        rating_text = (
+            f"⭐️ {rating}/5"
+        )
+
     else:
-        rating_text = "Без оценки"
+
+        rating_text = (
+            "Без оценки"
+        )
 
     caption = (
         "☕️ <b>Кофе записан</b>\n\n"
@@ -774,22 +975,39 @@ async def rating_handler(
     )
 
 
-# =========================================================
-# СТАТИСТИКА
-# =========================================================
+# ============================================================
+# STATISTICS
+# ============================================================
 
-@dp.callback_query(F.data == "statistics")
+@dp.callback_query(
+    F.data == "statistics"
+)
 async def statistics_handler(
     callback: CallbackQuery,
 ):
 
     await callback.answer()
 
-    stats = await get_statistics(
-        callback.from_user.id
-    )
+    try:
 
-    if stats["total"] == 0:
+        stats = await get_statistics(
+            callback.from_user.id
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Statistics error"
+        )
+
+        await callback.answer(
+            "Не удалось загрузить статистику.",
+            show_alert=True,
+        )
+
+        return
+
+    if not stats or stats["total"] == 0:
 
         caption = (
             "📊 <b>Статистика</b>\n\n"
@@ -799,26 +1017,35 @@ async def statistics_handler(
 
     else:
 
-        if stats["average_rating"] is not None:
-            average_rating = (
-                f"⭐️ {stats['average_rating']}/5"
+        average_rating = stats.get(
+            "average_rating"
+        )
+
+        if average_rating is not None:
+
+            average_rating_text = (
+                f"⭐️ {average_rating}/5"
             )
+
         else:
-            average_rating = "⭐️ Нет оценок"
+
+            average_rating_text = (
+                "⭐️ Нет оценок"
+            )
 
         caption = (
             "📊 <b>Статистика</b>\n\n"
             f"☕️ Всего кофе — "
-            f"<b>{stats['total']}</b>\n\n"
+            f"<b>{stats.get('total', 0)}</b>\n\n"
             f"☕ Любимый кофе\n"
-            f"<b>{stats['favorite_coffee']}</b>\n\n"
+            f"<b>{safe_text(stats.get('favorite_coffee'))}</b>\n\n"
             f"🏪 Любимая кофейня\n"
-            f"<b>{stats['favorite_shop']}</b>\n\n"
+            f"<b>{safe_text(stats.get('favorite_shop'))}</b>\n\n"
             f"📏 Любимый размер\n"
-            f"<b>{stats['favorite_size']}</b>\n\n"
+            f"<b>{safe_text(stats.get('favorite_size'))}</b>\n\n"
             f"🏪 Кофеен посещено — "
-            f"<b>{stats['shops_count']}</b>\n\n"
-            f"{average_rating}"
+            f"<b>{stats.get('shops_count', 0)}</b>\n\n"
+            f"{average_rating_text}"
         )
 
     await edit_screen(
@@ -829,18 +1056,32 @@ async def statistics_handler(
     )
 
 
-# =========================================================
-# ИСТОРИЯ
-# =========================================================
+# ============================================================
+# HISTORY
+# ============================================================
 
 async def render_history(
     message: Message,
     telegram_id: int,
 ):
 
-    coffees = await get_all_coffees(
-        telegram_id
-    )
+    try:
+
+        coffees = await get_all_coffees(
+            telegram_id
+        )
+
+    except Exception:
+
+        logger.exception(
+            "History loading error"
+        )
+
+        await message.answer(
+            "Не удалось загрузить историю."
+        )
+
+        return
 
     if not coffees:
 
@@ -871,7 +1112,7 @@ async def render_history(
     for coffee in coffees:
 
         date_text, time_text = format_datetime(
-            coffee["created_at"]
+            coffee.get("created_at")
         )
 
         if date_text != current_date:
@@ -885,21 +1126,28 @@ async def render_history(
 
             current_date = date_text
 
-        rating = coffee.get("rating")
+        rating = coffee.get(
+            "rating"
+        )
 
-        if rating:
-            rating_text = f" · ⭐️ {rating}"
+        if rating is not None:
+
+            rating_text = (
+                f" · ⭐️ {rating}"
+            )
+
         else:
+
             rating_text = ""
 
         lines.append(
             f"{time_text} · "
-            f"<b>{coffee['coffee_name']}</b> · "
-            f"{coffee['coffee_size']}"
+            f"<b>{safe_text(coffee.get('coffee_name'))}</b> · "
+            f"{safe_text(coffee.get('coffee_size'))}"
         )
 
         lines.append(
-            f"📍 {coffee['coffee_shop']}"
+            f"📍 {safe_text(coffee.get('coffee_shop'))}"
             f"{rating_text}"
         )
 
@@ -909,24 +1157,37 @@ async def render_history(
 
     for coffee in coffees:
 
-        buttons.append([
-            InlineKeyboardButton(
-                text=(
-                    f"🗑 {coffee['coffee_name']} "
-                    f"· {coffee['coffee_size']}"
-                ),
-                callback_data=(
-                    f"delete:{coffee['id']}"
-                ),
-            )
-        ])
-
-    buttons.append([
-        InlineKeyboardButton(
-            text="← Назад",
-            callback_data="back_main",
+        coffee_id = coffee.get(
+            "id"
         )
-    ])
+
+        if coffee_id is None:
+            continue
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=(
+                        f"🗑 "
+                        f"{safe_text(coffee.get('coffee_name'))} "
+                        f"· "
+                        f"{safe_text(coffee.get('coffee_size'))}"
+                    ),
+                    callback_data=(
+                        f"delete:{coffee_id}"
+                    ),
+                )
+            ]
+        )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="← Назад",
+                callback_data="back_main",
+            )
+        ]
+    )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=buttons
@@ -940,7 +1201,9 @@ async def render_history(
     )
 
 
-@dp.callback_query(F.data == "history")
+@dp.callback_query(
+    F.data == "history"
+)
 async def history_handler(
     callback: CallbackQuery,
 ):
@@ -953,32 +1216,54 @@ async def history_handler(
     )
 
 
-# =========================================================
-# УДАЛЕНИЕ
-# =========================================================
+# ============================================================
+# DELETE
+# ============================================================
 
-@dp.callback_query(F.data.startswith("delete:"))
+@dp.callback_query(
+    F.data.startswith("delete:")
+)
 async def delete_handler(
     callback: CallbackQuery,
 ):
 
     try:
+
         coffee_id = int(
-            callback.data.split(":", 1)[1]
+            callback.data.split(
+                ":",
+                1,
+            )[1]
         )
+
     except (ValueError, IndexError):
 
         await callback.answer(
-            "Ошибка записи.",
+            "Некорректная запись.",
             show_alert=True,
         )
 
         return
 
-    await delete_coffee(
-        telegram_id=callback.from_user.id,
-        coffee_id=coffee_id,
-    )
+    try:
+
+        await delete_coffee(
+            telegram_id=callback.from_user.id,
+            coffee_id=coffee_id,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Delete coffee error"
+        )
+
+        await callback.answer(
+            "Не удалось удалить запись.",
+            show_alert=True,
+        )
+
+        return
 
     await callback.answer(
         "Запись удалена 🗑"
@@ -990,9 +1275,28 @@ async def delete_handler(
     )
 
 
-# =========================================================
-# HTTP SERVER ДЛЯ RENDER
-# =========================================================
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+@dp.errors()
+async def global_error_handler(
+    event,
+):
+    """
+    Логируем необработанные ошибки,
+    чтобы Render не терял причину сбоя.
+    """
+
+    logger.exception(
+        "Unhandled dispatcher error: %s",
+        event.exception,
+    )
+
+
+# ============================================================
+# HTTP HEALTH SERVER
+# ============================================================
 
 async def health_handler(
     request: web.Request,
@@ -1007,7 +1311,10 @@ async def health_handler(
 async def start_web_server():
 
     port = int(
-        os.getenv("PORT", "8080")
+        os.getenv(
+            "PORT",
+            "8080",
+        )
     )
 
     app = web.Application()
@@ -1022,7 +1329,9 @@ async def start_web_server():
         health_handler,
     )
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(
+        app
+    )
 
     await runner.setup()
 
@@ -1034,7 +1343,7 @@ async def start_web_server():
 
     await site.start()
 
-    logging.info(
+    logger.info(
         "HTTP health server started on port %s",
         port,
     )
@@ -1042,39 +1351,127 @@ async def start_web_server():
     return runner
 
 
-# =========================================================
-# ЗАПУСК
-# =========================================================
+# ============================================================
+# TELEGRAM POLLING
+# ============================================================
 
-async def main():
+async def start_bot():
 
-    logging.info(
-        "☕ Coffee Diary bot started"
-    )
+    """
+    Запускает polling.
 
-    web_runner = await start_web_server()
+    Важно:
+    Unauthorized НЕ пытаемся бесконечно лечить перезапуском.
+    Если токен отозван/неверный — Render должен показать
+    понятную ошибку.
+    """
 
     try:
 
-        await dp.start_polling(
-            bot,
-            handle_signals=True,
+        me = await bot.get_me()
+
+        logger.info(
+            "Telegram bot connected: @%s (id=%s)",
+            me.username,
+            me.id,
         )
+
+    except Exception:
+
+        logger.exception(
+            "❌ Telegram authentication failed. "
+            "Check BOT_TOKEN in Render Environment Variables."
+        )
+
+        raise
+
+    logger.info(
+        "🚀 Start polling"
+    )
+
+    await dp.start_polling(
+        bot,
+        handle_signals=True,
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    logger.info(
+        "☕ Coffee Diary bot starting..."
+    )
+
+    web_runner = None
+
+    try:
+
+        web_runner = await start_web_server()
+
+        await start_bot()
+
+    except Exception:
+
+        logger.exception(
+            "❌ Bot stopped because of an error."
+        )
+
+        raise
 
     finally:
 
-        logging.info(
-            "Stopping HTTP health server..."
-        )
+        if web_runner is not None:
 
-        await web_runner.cleanup()
+            logger.info(
+                "Stopping HTTP health server..."
+            )
 
-        logging.info(
+            try:
+                await web_runner.cleanup()
+
+            except Exception:
+
+                logger.exception(
+                    "Failed to cleanup HTTP server"
+                )
+
+        logger.info(
             "Closing Telegram bot session..."
         )
 
-        await bot.session.close()
+        try:
+            await bot.session.close()
 
+        except Exception:
+
+            logger.exception(
+                "Failed to close Telegram session"
+            )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        logger.info(
+            "Bot stopped manually."
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Fatal bot error."
+        )
