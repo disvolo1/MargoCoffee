@@ -202,7 +202,9 @@ async def edit_screen(
 
         try:
 
-            photo = load_character_image(character)
+            photo = load_character_image(
+                character
+            )
 
         except Exception:
 
@@ -213,9 +215,9 @@ async def edit_screen(
             photo = None
 
 
-        # -------------------------------------------------
+        # =====================================================
         # EXISTING PHOTO MESSAGE
-        # -------------------------------------------------
+        # =====================================================
 
         if message.photo:
 
@@ -240,8 +242,10 @@ async def edit_screen(
 
                     text = str(error)
 
-                    if "message is not modified" in text:
-
+                    if (
+                        "message is not modified"
+                        in text
+                    ):
                         return message
 
                     logger.warning(
@@ -257,9 +261,9 @@ async def edit_screen(
                     )
 
 
-            # ---------------------------------------------
+            # =================================================
             # FALLBACK: EDIT CAPTION
-            # ---------------------------------------------
+            # =================================================
 
             try:
 
@@ -271,7 +275,10 @@ async def edit_screen(
 
             except TelegramBadRequest as error:
 
-                if "message is not modified" not in str(error):
+                if (
+                    "message is not modified"
+                    not in str(error)
+                ):
 
                     logger.warning(
                         "edit_caption failed: %s",
@@ -287,9 +294,9 @@ async def edit_screen(
             return message
 
 
-        # -------------------------------------------------
+        # =====================================================
         # MESSAGE WITHOUT PHOTO
-        # -------------------------------------------------
+        # =====================================================
 
         try:
 
@@ -304,11 +311,13 @@ async def edit_screen(
 
             try:
 
-                new_message = await message.answer_photo(
-                    photo=photo,
-                    caption=caption,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML,
+                new_message = (
+                    await message.answer_photo(
+                        photo=photo,
+                        caption=caption,
+                        reply_markup=keyboard,
+                        parse_mode=ParseMode.HTML,
+                    )
                 )
 
                 return new_message
@@ -320,9 +329,9 @@ async def edit_screen(
                 )
 
 
-        # -------------------------------------------------
+        # =====================================================
         # TEXT FALLBACK
-        # -------------------------------------------------
+        # =====================================================
 
         try:
 
@@ -367,7 +376,8 @@ def format_datetime(value: str):
     ]
 
     date_text = (
-        f"{dt.day} {months[dt.month - 1]}"
+        f"{dt.day} "
+        f"{months[dt.month - 1]}"
     )
 
     time_text = dt.strftime("%H:%M")
@@ -386,11 +396,22 @@ async def show_main_screen(
     character: str = "idle",
 ):
 
-    coffees = await get_today_coffees(
-        telegram_id
-    )
+    try:
+
+        coffees = await get_today_coffees(
+            telegram_id
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Failed to load today's coffees"
+        )
+
+        coffees = []
 
     count = len(coffees)
+
 
     if coffees:
 
@@ -450,11 +471,23 @@ async def start_handler(
 
     telegram_id = message.from_user.id
 
-    coffees = await get_today_coffees(
-        telegram_id
-    )
+    try:
+
+        coffees = await get_today_coffees(
+            telegram_id
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Failed to load coffees on start"
+        )
+
+        coffees = []
+
 
     count = len(coffees)
+
 
     if coffees:
 
@@ -487,14 +520,18 @@ async def start_handler(
     )
 
 
-    photo = load_character_image("idle")
+    photo = load_character_image(
+        "idle"
+    )
 
 
-    sent_message = await message.answer_photo(
-        photo=photo,
-        caption=caption,
-        reply_markup=main_keyboard(),
-        parse_mode=ParseMode.HTML,
+    sent_message = (
+        await message.answer_photo(
+            photo=photo,
+            caption=caption,
+            reply_markup=main_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
     )
 
 
@@ -515,7 +552,10 @@ async def back_main_handler(
     state: FSMContext,
 ):
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
     await state.clear()
 
@@ -539,12 +579,16 @@ async def add_coffee_start(
     state: FSMContext,
 ):
 
-    # Отвечаем СРАЗУ.
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
 
     await state.update_data(
         main_message_id=callback.message.message_id
     )
+
 
     await state.set_state(
         AddCoffee.coffee_name
@@ -566,6 +610,7 @@ async def add_coffee_start(
         character="holding_coffee",
     )
 
+
     await state.update_data(
         main_message_id=result.message_id
     )
@@ -586,7 +631,9 @@ async def coffee_name_handler(
     if not message.text:
         return
 
+
     coffee_name = message.text.strip()
+
 
     if not coffee_name:
         return
@@ -595,6 +642,7 @@ async def coffee_name_handler(
     await state.update_data(
         coffee_name=coffee_name
     )
+
 
     await state.set_state(
         AddCoffee.coffee_size
@@ -612,9 +660,11 @@ async def coffee_name_handler(
 
     data = await state.get_data()
 
+
     main_message_id = data.get(
         "main_message_id"
     )
+
 
     if not main_message_id:
         return
@@ -655,14 +705,19 @@ async def coffee_size_handler(
     state: FSMContext,
 ):
 
-    # Сначала отвечаем Telegram.
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
 
     size = callback.data.split(":")[1]
+
 
     await state.update_data(
         coffee_size=size
     )
+
 
     await state.set_state(
         AddCoffee.coffee_shop
@@ -670,6 +725,7 @@ async def coffee_size_handler(
 
 
     data = await state.get_data()
+
 
     coffee_name = data.get(
         "coffee_name",
@@ -712,7 +768,9 @@ async def coffee_shop_handler(
     if not message.text:
         return
 
+
     coffee_shop = message.text.strip()
+
 
     if not coffee_shop:
         return
@@ -721,6 +779,7 @@ async def coffee_shop_handler(
     await state.update_data(
         coffee_shop=coffee_shop
     )
+
 
     await state.set_state(
         AddCoffee.rating
@@ -738,9 +797,11 @@ async def coffee_shop_handler(
 
     data = await state.get_data()
 
+
     main_message_id = data.get(
         "main_message_id"
     )
+
 
     if not main_message_id:
         return
@@ -750,6 +811,7 @@ async def coffee_shop_handler(
         "coffee_name",
         "Кофе",
     )
+
 
     coffee_size = data.get(
         "coffee_size",
@@ -793,8 +855,7 @@ async def rating_handler(
     state: FSMContext,
 ):
 
-    # ВАЖНО:
-    # callback отвечаем ДО Supabase.
+    # Отвечаем Telegram СРАЗУ.
     try:
 
         await callback.answer(
@@ -895,6 +956,7 @@ async def rating_handler(
 
     await state.clear()
 
+
     await state.update_data(
         main_message_id=result.message_id
     )
@@ -911,7 +973,11 @@ async def statistics_handler(
     callback: CallbackQuery,
 ):
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
 
     try:
 
@@ -941,7 +1007,8 @@ async def statistics_handler(
         if stats["average_rating"] is not None:
 
             average_rating = (
-                f"⭐️ {stats['average_rating']}/5"
+                f"⭐️ "
+                f"{stats['average_rating']}/5"
             )
 
         else:
@@ -1032,8 +1099,10 @@ async def render_history(
 
     for coffee in coffees:
 
-        date_text, time_text = format_datetime(
-            coffee["created_at"]
+        date_text, time_text = (
+            format_datetime(
+                coffee["created_at"]
+            )
         )
 
 
@@ -1049,7 +1118,9 @@ async def render_history(
             current_date = date_text
 
 
-        rating = coffee.get("rating")
+        rating = coffee.get(
+            "rating"
+        )
 
 
         if rating:
@@ -1088,8 +1159,10 @@ async def render_history(
             [
                 InlineKeyboardButton(
                     text=(
-                        f"🗑 {coffee['coffee_name']} "
-                        f"· {coffee['coffee_size']}"
+                        f"🗑 "
+                        f"{coffee['coffee_name']} "
+                        f"· "
+                        f"{coffee['coffee_size']}"
                     ),
                     callback_data=(
                         f"delete:{coffee['id']}"
@@ -1133,7 +1206,11 @@ async def history_handler(
     callback: CallbackQuery,
 ):
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
 
     await render_history(
         message=callback.message,
@@ -1152,9 +1229,15 @@ async def delete_handler(
     callback: CallbackQuery,
 ):
 
-    await callback.answer(
-        "Удаляю..."
-    )
+    try:
+
+        await callback.answer(
+            "Удаляю..."
+        )
+
+    except Exception:
+
+        pass
 
 
     try:
@@ -1162,6 +1245,7 @@ async def delete_handler(
         coffee_id = int(
             callback.data.split(":")[1]
         )
+
 
         await delete_coffee(
             telegram_id=callback.from_user.id,
@@ -1221,7 +1305,10 @@ async def start_web_server():
     )
 
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(
+        app
+    )
+
 
     await runner.setup()
 
@@ -1266,11 +1353,9 @@ async def prepare_telegram():
     )
 
 
-    # Удаляем webhook перед polling.
-    #
-    # ВАЖНО:
-    # drop_pending_updates=False
-    # чтобы не терять сообщения пользователей.
+    # =====================================================
+    # УДАЛЯЕМ WEBHOOK
+    # =====================================================
 
     await bot.delete_webhook(
         drop_pending_updates=False
@@ -1284,7 +1369,6 @@ async def prepare_telegram():
 async def run_polling():
 
     retry_delay = 5
-
 
     while True:
 
@@ -1300,7 +1384,7 @@ async def run_polling():
 
             await dp.start_polling(
                 bot,
-                handle_signals=True,
+                handle_signals=False,
             )
 
 
@@ -1317,26 +1401,50 @@ async def run_polling():
         except TelegramConflictError:
 
             logger.error(
-                "Telegram polling conflict: "
-                "another bot instance is using getUpdates."
+                "================================================="
+            )
+
+            logger.error(
+                "TELEGRAM CONFLICT"
+            )
+
+            logger.error(
+                "Another instance of this bot is running."
+            )
+
+            logger.error(
+                "Waiting 30 seconds before retry..."
+            )
+
+            logger.error(
+                "================================================="
             )
 
 
-            # Не спамим Telegram запросами.
-            await asyncio.sleep(15)
+            # ВАЖНО:
+            # При Conflict нельзя спамить Telegram
+            # повторными getUpdates.
+
+            await asyncio.sleep(30)
 
 
         except TelegramRetryAfter as error:
 
+            wait_time = max(
+                int(error.retry_after),
+                5,
+            )
+
+
             logger.warning(
                 "Telegram rate limit. "
                 "Waiting %s seconds.",
-                error.retry_after,
+                wait_time,
             )
 
 
             await asyncio.sleep(
-                error.retry_after
+                wait_time
             )
 
 
@@ -1414,6 +1522,7 @@ async def main():
 
         await run_polling()
 
+
     finally:
 
         logger.info(
@@ -1440,7 +1549,9 @@ if __name__ == "__main__":
 
     try:
 
-        asyncio.run(main())
+        asyncio.run(
+            main()
+        )
 
     except KeyboardInterrupt:
 
